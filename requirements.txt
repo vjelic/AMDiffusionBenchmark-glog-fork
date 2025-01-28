@@ -1,0 +1,16 @@
+accelerate==1.2.1
+csvkit==2.0.1
+datasets==3.2.0 
+deepspeed==0.16.2
+diffusers==0.31.0 
+GitPython==3.1.44
+huggingface_hub[cli]==0.27.0
+opencv-python-headless==4.10.0.84 
+peft==0.14.0
+protobuf==5.29.2
+pytest==8.3.4
+python-dotenv==1.0.1
+seaborn==0.13.2
+sentencepiece==0.2.0
+tensorboard==2.18.0
+transformers==4.47.0

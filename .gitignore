@@ -1,0 +1,42 @@
+# Python and virtual environment files
+temp/
+*.pem
+__pycache__/
+.venv/
+cache/
+*.pyc
+*.pyo
+*.pyd
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.egg-info/
+dist/
+build/
+*.egg
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# Project files/folders
+config/*.json
+config/*.env
+cache/
+analysis_notebook.html
+logs/traces/*
+.env
