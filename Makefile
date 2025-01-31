@@ -1,14 +1,14 @@
 # Check if .env exists, if not, use .env.example
 ifneq ("$(wildcard .env)","")
-        include .env
+	include .env
 else
-        include .env.example
+	include .env.example
 endif
 
 HF_HOME ?= ~/.cache/huggingface
-  
+
 .PHONY: download_assets build_docker launch_docker build_and_launch_docker exec_docker
-  
+
 # Target to download the assets
 download_assets:
 	# login into HF if needed
@@ -55,7 +55,7 @@ build_and_launch_docker:
 # Target to execute a shell inside the running Docker container
 exec_docker:
 	docker exec -it $(CONTAINER_NAME) bash -c '\
-        echo -e "\n\n\033[1;31mEntered Docker container: $(CONTAINER_NAME)\033[0m"; \
-        exec bash \
+		echo -e "\n\n\033[1;31mEntered Docker container: $(CONTAINER_NAME)\033[0m"; \
+		exec bash \
 	'
 

@@ -15,7 +15,7 @@ import torch.distributed
 import torch.nn.functional as F
 import transformers
 from accelerate import Accelerator, ProfileKwargs
-from accelerate.utils import DummyOptim, DummyScheduler, set_seed
+from accelerate.utils import DummyOptim, DummyScheduler, DynamoBackend, set_seed
 from diffusers import (
     AutoencoderKL,
     FlowMatchEulerDiscreteScheduler,
@@ -123,9 +123,6 @@ class Trainer:
                 substitute_sdpa_with_flash_attn=self.args.substitute_sdpa_with_flash_attn
             )
         )
-
-        # Flop counter for transformer model
-        self.flop_counter = FlopCounterMode(display=False, depth=None)
 
         # Hacky way of getting deepspeed zero stage 3 working
         # (init on multiple models seems to not be supported in accelerate)
@@ -746,10 +743,21 @@ class Trainer:
             or not self.accelerator.is_local_main_process,
         )
 
+        # Calculate the flops for the training loop
+        flop_counter = FlopCounterMode(display=False, depth=None)
+        total_flops = 0.0
+
+        # Disable flop counting when using torch.compile
+        if self.accelerator.state.dynamo_plugin.backend != DynamoBackend.NO:
+            flop_counter = contextlib.nullcontext()
+            logger.warning(
+                "WARNING: Disabling TFlops/s calculations due to incompatability with torch.compile"
+            )
+
         # Training loop
         global_step = 0
         train_loss = 0.0
-        total_flops = None
+
         while global_step < self.args.num_iterations:
             for step, batch in enumerate(train_dataloader):
                 # Generate validation image
@@ -769,9 +777,9 @@ class Trainer:
                     # and should be removed in real use
                     self.accelerator.wait_for_everyone()
 
-                with self.accelerator.accumulate(
-                    self.transformer
-                ) and self.profiling_ctx(step) and self.flop_counter:
+                with self.accelerator.accumulate(self.transformer), self.profiling_ctx(
+                    step
+                ), flop_counter:
                     start_time = time.time()
                     # Encode the images
                     latents, image_ids = self.encode_image(batch)
@@ -807,17 +815,9 @@ class Trainer:
                         return_dict=False,
                     )[0]
 
-                    # Flow matching loss
+                    # Flow matching loss and backward pass
                     target = noise - latents
                     loss = F.mse_loss(pred.float(), target.float(), reduction="mean")
-
-                    # Calculate loss across gpus and backwards pass
-                    avg_loss = self.accelerator.gather(
-                        loss.repeat(self.args.train_batch_size)
-                    ).mean()
-                    train_loss += (
-                        avg_loss.item() / self.args.gradient_accumulation_steps
-                    )
                     self.accelerator.backward(loss)
 
                     # Clip gradients
@@ -835,12 +835,23 @@ class Trainer:
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
+                # Wait for all processes to finish before recording the time
+                if self.accelerator.use_distributed:
+                    self.accelerator.wait_for_everyone()
                 step_time = time.time() - start_time
                 fps_gpu = self.args.train_batch_size / step_time
+
+                # Calculate loss across all processes
+                # This is only for logging purposes; loss.backward() has already been done above
+                avg_loss = self.accelerator.gather(
+                    loss.repeat(self.args.train_batch_size)
+                ).mean()
+                train_loss += avg_loss.item() / self.args.gradient_accumulation_steps
+
                 # Remove flop counter since we only need to compute the flops once.
-                if total_flops is None:
-                    total_flops = self.flop_counter.get_total_flops()
-                    self.flop_counter = contextlib.nullcontext()
+                if isinstance(flop_counter, FlopCounterMode):
+                    total_flops = flop_counter.get_total_flops()
+                    flop_counter = contextlib.nullcontext()
                 logs = {
                     "step_loss": loss.detach().item(),
                     "lr": lr_scheduler.get_last_lr()[0],

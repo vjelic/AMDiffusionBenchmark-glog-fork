@@ -59,8 +59,8 @@ IMAGE_NAME=flux-pytorch
 
 To build and launch the Docker container, use the following Makefile target (in the **repository root**):
 
-```bash  
-make build_and_launch_docker  
+```bash
+make build_and_launch_docker
 ```
 
 * By default, the Docker launch will create a local directory `~/.cache/huggingface` (Hugging Face's default local cache dir) it doesn't previously exist (e.g. if Hugging Face cli is not installed).
@@ -109,12 +109,12 @@ make download_assets
 * **Becauce of caching (see below) the script only needs to run once!**
 * The script can be run either inside a Docker container (preferable) or locally.
 Running it locally requires the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli) to be installed.
-The Docker container already includes this requirement.  
+The Docker container already includes this requirement.
 * The script will prompt the user to provide a valid Hugging Face user access token, if not already logged in
 * By default, the assets are downloaded to `~/.cache/huggingface`; Hugging Face's default local cache dir (HF cache). 
 * The default `VOLUME_MOUNT` configuration synchronizes the local HF cache with that of the Docker container. 
 As a result, running `make download_assets` inside Docker saves the assets locally in the same location as described above. 
-Conversely, any assets downloaded locally are automatically also available in the Docker container.  
+Conversely, any assets downloaded locally are automatically also available in the Docker container.
 
 ## Running the FLUX.1-dev full-weight training
 
@@ -156,7 +156,7 @@ The frames per second (FPS) for a single GPU using `bf16` precision are shown in
 
 | Precision | Single GPU FPS (batch size = 1) | Single GPU FPS (optimal batch size) |
 | --------- | ------------------------------- | ----------------------------------- |
-| bf16      | 2.06                            | 4.48 (batch size = 10)              |
+| bf16      | 2.03                            | 4.34 (batch size = 10)              |
 
 ### Reproducing the benchmarks
 
