@@ -1,5 +1,5 @@
 # Start from ROCm capable base image
-FROM rocm/training:20250116
+FROM rocm/pytorch-training:v25.2
 WORKDIR /workspace
 
 # Copy resources from FluxBenchmark and install requirements
