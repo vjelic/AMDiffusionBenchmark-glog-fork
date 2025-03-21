@@ -16,8 +16,7 @@ Features:
 Usage Example:
 -------------
 python launcher.py \
-    --param_config_file config/minimal_benchmark_config.yaml \
-    --accelerate_config_template config/accelerate_fsdp_config.yaml \
+    --config_file config/flux_mini_benchmark.yaml \
     --output_dir outputs/runs/sweep_000 \
     --dry-run
 
@@ -25,18 +24,22 @@ The script generates a runs_summary.csv with metrics and metadata for analysis.
 """
 
 import argparse
-import copy
 import datetime
 import itertools
 import logging
 import os
 import subprocess
+import tempfile
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 import git
 import pandas as pd
 import yaml
+from dotenv import load_dotenv
+from flatten_dict import flatten, unflatten
+from hydra import compose, initialize
+from omegaconf import DictConfig, OmegaConf
 
 from src.constants import (
     ACCELERATE_CONFIG,
@@ -44,6 +47,7 @@ from src.constants import (
     DEFAULT_METRICS,
     METADATA_COLUMNS,
     METRIC_COLUMNS,
+    NUM_FRAMES,
     RUN_ID,
     STATUS,
     STATUS_OOM,
@@ -61,14 +65,16 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+# Load environment variables from a .env file
+load_dotenv()
 
-def parse_args() -> argparse.Namespace:
+
+def parse_args() -> Tuple[argparse.Namespace, DictConfig]:
     """Parses command-line arguments.
 
     Returns:
         argparse.Namespace: Parsed command-line arguments with parameters:
-            param_config_file: Path to the YAML parameter configuration file
-            accelerate_config_template: Path to the Accelerate config template
+            config_file: Path to the YAML parameter configuration file
             output_dir: Directory for output logs and configs
             dry_run: Whether to do a dry run without execution
             warmup_steps: Number of initial steps to exclude from averages
@@ -80,20 +86,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--param_config_file",
+        "--config_file",
         type=str,
-        default=os.getenv(
-            "LAUNCHER_PARAM_CONFIG", "config/minimal_benchmark_config.yaml"
-        ),
+        default=os.getenv("LAUNCHER_PARAM_CONFIG", "config/flux_mini_benchmark.yaml"),
         help="Path to the YAML parameter configuration file containing parameter values.",
-    )
-    parser.add_argument(
-        "--accelerate_config_template",
-        type=str,
-        default=os.getenv(
-            "LAUNCHER_ACCELERATE_CONFIG", "config/accelerate_fsdp_config.yaml"
-        ),
-        help="Path to the Accelerate config file template.",
     )
     parser.add_argument(
         "--output_dir",
@@ -102,10 +98,16 @@ def parse_args() -> argparse.Namespace:
         help="Directory where output logs and configs will be saved.",
     )
     parser.add_argument(
-        "--dry-run",
+        "--dry_run",
         action="store_true",
         default=False,
         help="Whether to perform a dry run without executing training commands.",
+    )
+    parser.add_argument(
+        "--show_config",
+        action="store_true",
+        default=False,
+        help="Simply visualize the full config without executing the runs.",
     )
     parser.add_argument(
         "--warmup_steps",
@@ -114,106 +116,55 @@ def parse_args() -> argparse.Namespace:
         help="Number of initial steps to exclude from average computations.",
     )
     parser.add_argument(
-        "--no-resume",
+        "--no_resume",
         action="store_false",
         dest="resume",
         help="If specified, do not skip any runs regardless of previous status.",
     )
     parser.add_argument(
-        "--no-skip-larger-bs",
+        "--no_skip_larger_bs",
         action="store_false",
         dest="skip_larger_bs",
         help="Do not skip runs with larger batch sizes if smaller ones OOMed.",
     )
 
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     # Validate paths
-    if not os.path.isfile(args.param_config_file):
-        parser.error(f"Parameter config file not found: {args.param_config_file}")
-    if not os.path.isfile(args.accelerate_config_template):
-        parser.error(
-            f"Accelerate config template not found: {args.accelerate_config_template}"
-        )
+    if not os.path.isfile(args.config_file):
+        parser.error(f"Parameter config file not found: {args.config_file}")
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
-    return args
+    return args, unknown
 
 
-def set_nested_value(d: Dict[str, Any], keys: List[str], value: Any) -> None:
-    """Recursively sets a value in a nested dictionary.
-
-    If intermediate keys do not exist, they will be created as empty dictionaries.
-
-    Args:
-        d (Dict[str, Any]): The dictionary to update.
-        keys (List[str]): List of keys representing the path to the value.
-        value (Any): The value to set.
-    """
-    if len(keys) == 1:
-        d[keys[0]] = value
-    else:
-        if not isinstance(d.get(keys[0]), dict):
-            d[keys[0]] = {}
-        set_nested_value(d[keys[0]], keys[1:], value)
-
-
-def update_accelerate_config(
-    template_path: str, override_params: Dict[str, Any], output_path: str
-) -> None:
-    """Updates an Accelerate configuration file with overridden parameters.
-
-    Args:
-        template_path (str): Path to the template Accelerate config YAML file.
-        override_params (Dict[str, Any]): Dictionary of parameters to override in the config.
-            Keys can be nested keys separated by dots.
-        output_path (str): Path where the updated config file will be saved.
-    """
-    # Load the template accelerate config
-    with open(template_path, "r") as f:
-        accelerate_config = yaml.safe_load(f)
-
-    # Create a deep copy to avoid modifying the original template
-    updated_config = copy.deepcopy(accelerate_config)
-
-    # Override parameters using the helper function
-    for key, value in override_params.items():
-        keys = key.split(".")
-        set_nested_value(updated_config, keys, value)
-
-    # Save the updated accelerate config
-    with open(output_path, "w") as f:
-        yaml.dump(updated_config, f)
-
-
-def load_configurations(param_config_file: str) -> List[Dict[str, Dict[str, Any]]]:
+def load_configurations(cfg: dict) -> List[Dict[str, Dict[str, Any]]]:
     """Loads configurations from a parameter configuration file and generates all combinations.
 
     Args:
-        param_config_file (str): Path to the YAML parameter configuration file.
+        config_file (str): Path to the YAML parameter configuration file.
 
     Returns:
         List[Dict[str, Dict[str, Any]]]: A list of configurations, each containing
-            'accelerate_config' and 'cli_args' dictionaries.
+            'accelerate_config' and 'train_args' dictionaries.
     """
-    config = load_yaml_config(param_config_file)
-    accelerate_combinations = generate_combinations(config.get(ACCELERATE_CONFIG, {}))
-    cli_combinations = generate_combinations(config.get(CLI_ARGS, {}))
+    accelerate_combinations = generate_combinations(cfg.get(ACCELERATE_CONFIG, {}))
+    cli_combinations = generate_combinations(cfg.get(CLI_ARGS, {}))
     return combine_configurations(accelerate_combinations, cli_combinations)
 
 
-def load_yaml_config(param_config_file: str) -> Dict[str, Any]:
+def load_yaml_config(config_file: str) -> Dict[str, Any]:
     """Loads a YAML configuration file.
 
     Args:
-        param_config_file (str): Path to the YAML parameter configuration file.
+        config_file (str): Path to the YAML parameter configuration file.
 
     Returns:
         Dict[str, Any]: Parsed YAML configuration.
     """
-    with open(param_config_file, "r") as f:
+    with open(config_file, "r") as f:
         return yaml.safe_load(f)
 
 
@@ -227,12 +178,34 @@ def generate_combinations(params: Dict[str, Any]) -> List[Dict[str, Any]]:
         List[Dict[str, Any]]: List of parameter combinations.
     """
     if params:
-        param_names = list(params.keys())
-        param_values = list(params.values())
-        return [
-            dict(zip(param_names, values))
-            for values in itertools.product(*param_values)
-        ]
+        # flatten the config e.g. {dynamo_config: {dynamo_mode: default}} -> {dynamo_config.dynamo_mode: default}
+        flat_params = flatten(params, reducer="dot")
+        # Split params dict into those iterable values and those with single values
+        iterable_valued_dict: Dict[str, Any] = {}
+        single_valued_dict: Dict[str, Any] = {}
+        for key, value in flat_params.items():
+            if isinstance(value, Iterable) and not isinstance(value, str) and value:
+                iterable_valued_dict[key] = value
+            else:
+                single_valued_dict[key] = value
+
+        # No combinations to generate
+        if not iterable_valued_dict:
+            return [unflatten(flat_params, splitter="dot")]
+
+        # Generate all combinations of the list values
+        keys = list(iterable_valued_dict.keys())
+        product_values = itertools.product(*iterable_valued_dict.values())
+
+        # Create a list of dictionaries for each combination
+        combinations = []
+        for combination in product_values:
+            # Create a dictionary for the current combination
+            current_combination = {**dict(zip(keys, combination)), **single_valued_dict}
+            combinations.append(unflatten(current_combination, splitter="dot"))
+
+        return combinations
+
     return [{}]
 
 
@@ -261,13 +234,13 @@ def combine_configurations(
 
 
 def build_command(
-    unique_accelerate_config_path: str, cli_args_params: Dict[str, Any]
+    accelerate_config_path: str, train_args_params: Dict[str, Any]
 ) -> List[str]:
     """Builds the command to execute the training script.
 
     Args:
-        unique_accelerate_config_path (str): Path to the unique Accelerate config file.
-        cli_args_params (Dict[str, Any]): Dictionary of CLI arguments.
+        accelerate_config_path (str): Path to the Accelerate config file.
+        train_args_params (Dict[str, Any]): Dictionary of CLI arguments.
 
     Returns:
         List[str]: The command to be executed as a list of strings.
@@ -276,10 +249,10 @@ def build_command(
         "accelerate",
         "launch",
         "--config_file",
-        unique_accelerate_config_path,
+        accelerate_config_path,
         "train.py",
     ]
-    for param, value in cli_args_params.items():
+    for param, value in train_args_params.items():
         if isinstance(value, bool):
             if value:
                 cmd.append(f"--{param}")
@@ -291,21 +264,24 @@ def build_command(
 def save_configuration(
     config_filename: str,
     accelerate_config_params: Dict[str, Any],
-    cli_args_params: Dict[str, Any],
+    train_args_params: Dict[str, Any],
 ) -> None:
     """Saves the combined configuration to a YAML file.
 
     Args:
         config_filename (str): Path to the configuration file.
         accelerate_config_params (Dict[str, Any]): Accelerate configuration parameters.
-        cli_args_params (Dict[str, Any]): CLI arguments.
+        train_args_params (Dict[str, Any]): CLI arguments.
     """
     combined_config = {
         ACCELERATE_CONFIG: accelerate_config_params,
-        CLI_ARGS: cli_args_params,
+        CLI_ARGS: train_args_params,
     }
     with open(config_filename, "w") as f:
-        yaml.dump(combined_config, f)
+        yaml.dump(
+            combined_config,
+            f,
+        )
 
 
 def should_skip_already_done(dataframe: pd.DataFrame, run_id: int) -> bool:
@@ -400,43 +376,45 @@ def run_training(
 def should_skip_obvious_ooms(
     df: pd.DataFrame,
     run_id: int,
+    target_feature: str,
     accelerate_config_params: Dict[str, Any],
-    cli_args_params: Dict[str, Any],
+    train_args_params: Dict[str, Any],
     output_dir: str,
     git_info: Dict[str, Any],
 ) -> bool:
-    """Determines whether to skip a run if a previous smaller batch size configuration resulted in OOM.
+    """Determines whether to skip a run if a previous smaller configuration resulted in OOM.
 
-    This logic checks if there's a configuration identical in all parameters except batch size,
-    which previously OOMed at a smaller batch size than the current run's batch size. If found,
-    we skip the current run to save time.
+    This logic checks if there's a configuration identical in all parameters except one feature
+    (e.g. batch size, max num frames), which previously OOMed at a smaller configuration than the
+    current run. If found, we skip the current run to save time.
 
     Args:
         df (pd.DataFrame): The DataFrame of all runs and metrics.
         run_id (int): The current run identifier.
+        target_feature (str): The feature to compare (e.g. batch size).
         accelerate_config_params (Dict[str, Any]): Current run's accelerate configuration parameters.
-        cli_args_params (Dict[str, Any]): Current run's CLI arguments.
+        train_args_params (Dict[str, Any]): Current run's CLI arguments.
         output_dir (str): Directory where output logs and configs are saved.
         git_info (Dict[str, Any]): Git information.
 
     Returns:
-        bool: True if the run should be skipped due to a prior smaller batch size OOM, False otherwise.
+        bool: True if the run should be skipped due to a prior smaller configuration OOM, False otherwise.
     """
-    current_batch_size = cli_args_params.get(TRAIN_BATCH_SIZE)
-    if current_batch_size is None:
+    current_target_feature = train_args_params.get(target_feature)
+    if current_target_feature is None:
         return False
-    if df.empty or TRAIN_BATCH_SIZE not in df.columns:
+    if df.empty or target_feature not in df.columns:
         return False
 
     # Exclude known non-config columns from comparison
     exclude_cols = METADATA_COLUMNS + METRIC_COLUMNS
 
-    # Combine configuration parameters (accelerate + CLI) and filter out batch size & non-config keys
-    combined_params = {**accelerate_config_params, **cli_args_params}
+    # Combine configuration parameters (accelerate + CLI) and filter out feature & non-config keys
+    combined_params = {**accelerate_config_params, **train_args_params}
     config_filter = {
         k: v
         for k, v in combined_params.items()
-        if k != TRAIN_BATCH_SIZE and k not in exclude_cols
+        if k != target_feature and k not in exclude_cols
     }
 
     # If any required config key isn't in the DataFrame, no match can be found
@@ -444,13 +422,13 @@ def should_skip_obvious_ooms(
         if k not in df.columns:
             return False
 
-    # Filter the DataFrame for runs with OOM status and smaller batch size
+    # Filter the DataFrame for runs with OOM status and smaller config
     found_match = False
     for _, run in df.iterrows():
-        # Skip if batch size conditions aren't met
+        # Skip if feature conditions aren't met
         if (
-            not run[TRAIN_BATCH_SIZE]
-            or run[TRAIN_BATCH_SIZE] >= current_batch_size
+            not run[target_feature]
+            or run[target_feature] >= current_target_feature
             or run[STATUS] != STATUS_OOM
         ):
             continue
@@ -464,7 +442,7 @@ def should_skip_obvious_ooms(
 
     if found_match:
         logging.info(
-            f"{STATUS_OOM_SKIPPED.upper()}: Skipping run {run_id} because a smaller batch size configuration OOMed previously."
+            f"{STATUS_OOM_SKIPPED.upper()}: Skipping run {run_id} because a smaller {target_feature} configuration OOMed previously."
         )
         # Create a new row for the skipped run with oom-skipped status
         skipped_data = pd.Series(
@@ -472,21 +450,18 @@ def should_skip_obvious_ooms(
                 RUN_ID: run_id,
                 "timestamp": datetime.datetime.now(),
                 **accelerate_config_params,
-                **cli_args_params,
+                **train_args_params,
                 **DEFAULT_METRICS,
                 **git_info,
                 STATUS: STATUS_OOM_SKIPPED,
             }
         )
-        # Update the dataframe
+        # Update the dataframe: if the row exists, replace it entirely; otherwise, append it.
         if run_id not in df[RUN_ID].values:
             df = pd.concat([df, pd.DataFrame([skipped_data])], ignore_index=True)
         else:
-            # Convert the data types before assignment
-            for col in skipped_data.index:
-                df.loc[df[RUN_ID] == run_id, col] = df[col].dtype.type(
-                    skipped_data[col]
-                )
+            row_index = df.index[df[RUN_ID] == run_id][0]
+            df.loc[row_index] = skipped_data
 
         save_dataframe(df, output_dir)
         return True
@@ -497,32 +472,20 @@ def should_skip_obvious_ooms(
 def prepare_run_configurations(
     combinations: List[Dict[str, Dict[str, Any]]],
     output_dir: str,
-    accelerate_template: str,
 ) -> None:
     """Prepare configurations for all runs.
 
     Args:
         combinations: List of parameter combinations
         output_dir: Directory for output files
-        accelerate_template: Path to accelerate config template
     """
     for idx, combination in enumerate(combinations, start=1):
         accelerate_config_params = combination[ACCELERATE_CONFIG]
-        cli_args_params = combination[CLI_ARGS]
-
-        # Create unique accelerate config
-        unique_accelerate_config_path = os.path.join(
-            output_dir, f"{idx}_accelerate_config.yaml"
-        )
-        update_accelerate_config(
-            accelerate_template,
-            accelerate_config_params,
-            unique_accelerate_config_path,
-        )
+        train_args_params = combination[CLI_ARGS]
 
         # Save combined configuration
         config_filename = os.path.join(output_dir, f"{idx}_config.yaml")
-        save_configuration(config_filename, accelerate_config_params, cli_args_params)
+        save_configuration(config_filename, accelerate_config_params, train_args_params)
 
 
 def should_skip(
@@ -549,12 +512,27 @@ def should_skip(
 
     if args.skip_larger_bs and dataframe is not None and not dataframe.empty:
         accelerate_config_params = combination[ACCELERATE_CONFIG]
-        cli_args_params = combination[CLI_ARGS]
+        train_args_params = combination[CLI_ARGS]
+
+        # check for OOMs for smaller batch size configs
         if should_skip_obvious_ooms(
             dataframe,
             idx,
+            TRAIN_BATCH_SIZE,
             accelerate_config_params,
-            cli_args_params,
+            train_args_params,
+            args.output_dir,
+            git_info,
+        ):
+            return True
+
+        # check for OOMs for smaller max num frames configs
+        if should_skip_obvious_ooms(
+            dataframe,
+            idx,
+            NUM_FRAMES,
+            accelerate_config_params,
+            train_args_params,
             args.output_dir,
             git_info,
         ):
@@ -585,38 +563,48 @@ def execute_run(
 
     """
     accelerate_config_params = combination[ACCELERATE_CONFIG]
-    cli_args_params = combination[CLI_ARGS]
+    train_args_params = combination[CLI_ARGS]
 
-    # Setup config and logs
-    unique_accelerate_config_path = os.path.join(
-        args.output_dir, f"{idx}_accelerate_config.yaml"
-    )
     # Prepare output file
     log_filename = os.path.join(args.output_dir, f"{idx}_logs.txt")
 
     # Log run info
     logging.info("=" * 50)
     logging.info(f"Starting run {idx}/{total_runs}")
-    logging.info(f"Accelerate Config Params: {accelerate_config_params}")
-    logging.info(f"CLI Args: {cli_args_params}")
+    logging.info(f"Config:\n\033[1;31m{yaml.dump(combination, sort_keys=False)}\033[0m")
     logging.info(f"Logging to {log_filename}")
 
-    # Build command line arguments, run the training script and capture the output
-    cmd = build_command(unique_accelerate_config_path, cli_args_params)
-    run_training(cmd, log_filename, idx, dry_run=args.dry_run)
+    temp_accelerate_config = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            delete=False,  # refrain from deleting the file automatically, so that subprocess can access
+            suffix=".yaml",
+            mode="w",
+            encoding="utf-8",
+        ) as temp_accelerate_config:
+            temp_file_path = temp_accelerate_config.name
+            # Dump the dictionary to the temporary file
+            yaml.dump(accelerate_config_params, temp_accelerate_config)
+            # Build command line arguments, run the training script and capture the output
+            cmd = build_command(temp_file_path, train_args_params)
+            run_training(cmd, log_filename, idx, dry_run=args.dry_run)
+    finally:
+        # Ensure the temporary config is removed if it exists
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
 
     return dataframe
 
 
-def main() -> None:
+def main(args: argparse.Namespace, cfg: dict) -> None:
     """Main function to execute the launcher script."""
-    args = parse_args()
-    all_combinations = load_configurations(args.param_config_file)
+    all_combinations = load_configurations(cfg)
     total_runs = len(all_combinations)
     logging.info(f"Total runs to execute: {total_runs}")
 
     prepare_run_configurations(
-        all_combinations, args.output_dir, args.accelerate_config_template
+        all_combinations,
+        args.output_dir,
     )
 
     git_info = get_git_info()
@@ -633,4 +621,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Parse argparse arguments first
+    args, unknown = parse_args()
+
+    # Initialize Hydra and compose the configuration
+    config_path, config_name = os.path.split(args.config_file)
+    with initialize(config_path=config_path, version_base=None):
+        param_config = compose(config_name=config_name, overrides=unknown)
+
+    yaml_config = OmegaConf.to_yaml(param_config)
+    logging.info(f"Full config:\n\033[1;31m{yaml_config}\033[0m")
+    if not args.show_config:
+        param_config = OmegaConf.to_container(param_config)
+        main(args, param_config)

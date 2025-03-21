@@ -1,7 +1,6 @@
 import argparse
 import logging
 import os
-import tempfile
 from unittest.mock import patch
 
 import numpy as np
@@ -174,12 +173,12 @@ def test_generate_dataframe_new_runs(tmp_path, mock_git_info):
         existing_csv.write_text("run_id,status,avg_loss\n5,success,0.22\n")
 
         (tmp_path / "1_config.yaml").write_text(
-            "accelerate_config:\n  testA: 1\ncli_args:\n  foo: 'bar'"
+            "accelerate_config:\n  testA: 1\ntrain_args:\n  foo: 'bar'"
         )
         (tmp_path / "1_logs.txt").write_text("INFO - Step 1 => step_loss': 1.0\n")
 
         (tmp_path / "5_config.yaml").write_text(
-            "accelerate_config:\n  testB: 2\ncli_args:\n  bar: 10"
+            "accelerate_config:\n  testB: 2\ntrain_args:\n  bar: 10"
         )
 
         df = process_logs.generate_dataframe(
@@ -247,7 +246,7 @@ def test_process_run_no_logs(tmp_path, mock_git_info):
     Test processing of run with valid configuration but no log file.
     """
     (tmp_path / "10_config.yaml").write_text(
-        "accelerate_config:\n  x: 5\ncli_args:\n  y: 10\n"
+        "accelerate_config:\n  x: 5\ntrain_args:\n  y: 10\n"
     )
     result = process_logs.process_run(
         10, str(tmp_path), warmup_steps=1, git_info=mock_git_info
@@ -263,7 +262,7 @@ def test_process_run_with_logs(tmp_path, mock_git_info):
     Test processing of run logs with valid configuration and log files.
     """
     (tmp_path / "11_config.yaml").write_text(
-        "accelerate_config:\n  p: 1.23\ncli_args:\n  q: 4.56\n"
+        "accelerate_config:\n  p: 1.23\ntrain_args:\n  q: 4.56\n"
     )
     log_content = "INFO - Step 1 => step_loss': 0.9\nINFO - Step 2 => step_loss': 0.7\n"
     (tmp_path / "11_logs.txt").write_text(log_content)

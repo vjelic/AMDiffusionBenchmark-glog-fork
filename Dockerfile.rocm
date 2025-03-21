@@ -1,15 +1,19 @@
 # Start from ROCm capable base image
 FROM rocm/pytorch-training:v25.2
+RUN pip3 uninstall tb-nightly -y
 WORKDIR /workspace
 
-# Copy resources from FluxBenchmark and install requirements
-COPY . FluxBenchmark
-RUN cd FluxBenchmark && \
+# Copy resources from AMDiffusionBenchmark and install requirements
+COPY . AMDiffusionBenchmark
+RUN cd AMDiffusionBenchmark && \
     pip3 install --no-cache-dir --upgrade pip packaging && \
     pip3 install --no-cache-dir -r requirements.txt
 
 # Setup HF's home
 ENV HF_HOME /workspace/huggingface
+
+# Fix torch.compile by increasing torch.dynamo.cache_limit
+ENV TORCH_DYNAMO_CACHE_SIZE_LIMIT 64
 
 # Set ENV variables that maximize perf:
 # Enable hipBLASLt as the backend for optimized GEMM (General Matrix Multiply) operations in rocBLAS
@@ -19,9 +23,9 @@ ENV DISABLE_ADDMM_CUDA_LT 0
 # Force the HIP runtime to place kernel arguments directly in device memory instead of host memory.
 ENV HIP_FORCE_DEV_KERNARG 1
 # Set NCCL operations to default-priority streams.
-ENV TORCH_NCCL_HIGH_PRIORITY 0
+ENV TORCH_NCCL_HIGH_PRIORITY 1
 # Configure the maximum number of hardware queues per GPU in the HIP runtime, enabling better parallelism.
-ENV GPU_MAX_HW_QUEUES 8
+ENV GPU_MAX_HW_QUEUES 6
 
-# Set workdir to FluxBenchmark
-WORKDIR /workspace/FluxBenchmark
+# Set workdir to AMDiffusionBenchmark
+WORKDIR /workspace/AMDiffusionBenchmark

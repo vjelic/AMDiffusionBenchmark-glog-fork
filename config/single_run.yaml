@@ -1,0 +1,4 @@
+defaults:
+  - accelerate_config: fsdp_config
+  - train_args: flux-dev
+  - _self_

@@ -34,7 +34,8 @@ STATUS_NOTRUN = "not_run"
 
 # Run parameter identifiers
 ACCELERATE_CONFIG = "accelerate_config"
-CLI_ARGS = "cli_args"
+CLI_ARGS = "train_args"
 RUN_ID = "run_id"
 STATUS = "status"
 TRAIN_BATCH_SIZE = "train_batch_size"
+NUM_FRAMES = "num_frames"

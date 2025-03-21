@@ -1,9 +1,11 @@
+import argparse
 import logging
 import subprocess
 import warnings
+from distutils.util import strtobool
+from typing import Tuple, Union
 
 from accelerate.logging import get_logger
-from distutils.util import strtobool
 
 
 def configure_logging():
@@ -35,8 +37,8 @@ def safely_eval_as_bool(x: str):
 def check_gpu_vendor():
     """
     Determines the GPU vendor by checking the availability of GPU management tools.
-    Returns "cuda" if NVIDIA's `nvidia-smi` is available, "rocm" if AMD's `rocm-smi` is available.
-    If neither `nvidia-smi` nor `rocm-smi` is available on the system, raises a RuntimeError.
+    Returns "cuda" if `nvidia-smi` is available, "rocm" if `rocm-smi` is available.
+    If neither of them is available on the system, raises a RuntimeError.
     """
     try:
         subprocess.run(
@@ -54,4 +56,22 @@ def check_gpu_vendor():
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
-    raise RuntimeError("Neither NVIDIA nor AMD GPU tools are available.")
+    raise RuntimeError("Unsupported GPU vendor.")
+
+
+def parse_resolution(resolution: Union[str, int]) -> Tuple[int, int]:
+    # Check if the input is a single integer
+    if isinstance(resolution, str) and resolution.isdigit():
+        resolution = int(resolution)
+
+    if isinstance(resolution, int):
+        return (int(resolution),) * 2
+
+    # Check if the input is in the form of "width,height"
+    try:
+        width, height = map(int, resolution.split(","))
+        return (width, height)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "Resolution must be an integer or a tuple of two integers in the form 'width,height'."
+        )

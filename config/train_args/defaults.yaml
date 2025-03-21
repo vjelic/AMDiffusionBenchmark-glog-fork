@@ -1,0 +1,6 @@
+# Only listing some the most commonly used train.py args here,
+# so that hydra overwrites are more convenient.
+# Rest of the parameters not listed in the configs
+# can be provided with `+train_args.<parameter>=<value>`.
+train_batch_size: 1
+num_iterations: 100

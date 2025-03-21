@@ -1,0 +1,11 @@
+defaults:
+  - defaults
+  - _self_
+
+model: hunyuan-video
+model_path: hunyuanvideo-community/HunyuanVideo
+train_data_path: Wild-Heart/Disney-VideoGeneration-Dataset
+train_batch_size: 1
+num_iterations: 100
+resolution: "960,544"
+num_frames: 9

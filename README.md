@@ -1,12 +1,35 @@
 # FLUX PyTorch benchmark
 
+## Table of contents
+
+- [FLUX PyTorch benchmark](#flux-pytorch-benchmark)
+  - [Table of contents](#table-of-contents)
+  - [Prerequisites](#prerequisites)
+  - [Quick setup](#quick-setup)
+  - [Detailed environment setup](#detailed-environment-setup)
+    - [Configuring environment variables with `.env` file](#configuring-environment-variables-with-env-file)
+    - [Building and launching the Docker image](#building-and-launching-the-docker-image)
+    - [Launching a prebuilt Docker image](#launching-a-prebuilt-docker-image)
+    - [Executing shell inside a Docker container](#executing-shell-inside-a-docker-container)
+    - [Downloading the assets](#downloading-the-assets)
+  - [Running FLUX.1-dev full-weight training](#running-flux1-dev-full-weight-training)
+    - [Creating a custom configuration](#creating-a-custom-configuration)
+    - [Run the benchmarks](#run-the-benchmarks)
+  - [Training stability and convergence analysis](#training-stability-and-convergence-analysis)
+  - [Contributing](#contributing)
+    - [Pre-commit hooks](#pre-commit-hooks)
+      - [Setup](#setup)
+      - [Usage](#usage)
+    - [Testing](#testing)
+      - [GPU-Dependent tests](#gpu-dependent-tests)
+
 ## Prerequisites
 
-* Git
-* Docker
-* AMD GPU(s) with appropriate drivers set up: tested on AMD's 8xMI300X
-* Valid [Hugging Face user access token](https://huggingface.co/docs/hub/en/security-tokens)
-* (Optional) [Hugging Face CLI documentation](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli)
+- Git
+- Docker
+- GPU(s) with appropriate drivers set up: tested on AMD's 8xMI300X
+- Valid [Hugging Face user access token](https://huggingface.co/docs/hub/en/security-tokens)
+- (Optional) [Hugging Face CLI documentation](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli)
 
 ## Quick setup
 
@@ -22,7 +45,7 @@
     make exec_docker
     ```
 
-3) Download the necessary assets: 
+3) Download the necessary assets:
 
     ```bash
     make download_assets
@@ -33,7 +56,6 @@
     ```bash
     python launcher.py
     ```
-
 
 ## Detailed environment setup
 
@@ -63,10 +85,10 @@ To build and launch the Docker container, use the following Makefile target (in 
 make build_and_launch_docker
 ```
 
-* By default, the Docker launch will create a local directory `~/.cache/huggingface` (Hugging Face's default local cache dir) it doesn't previously exist (e.g. if Hugging Face cli is not installed).
+- By default, the Docker launch will create a local directory `~/.cache/huggingface` (Hugging Face's default local cache dir) it doesn't previously exist (e.g. if Hugging Face cli is not installed).
 
-* It's possible to dynamically override `.env` defaults when running a make script by explicitly setting them.
-  Note that variables *must* come after the target so that `.env` won't overwrite them. 
+- It's possible to dynamically override `.env` defaults when running a make script by explicitly setting them.
+  Note that variables *must* come after the target so that `.env` won't overwrite them.
   For example:
 
   ```bash
@@ -77,7 +99,6 @@ make build_and_launch_docker
   ```
 
   will build and launch docker image `my_image` as a container named `my_container` with mount `/my_local_mount/:/my_docker_mount`.
-
 
 ### Launching a prebuilt Docker image
 
@@ -106,103 +127,193 @@ We provide a make script for convenience:
 make download_assets
 ```
 
-* **Becauce of caching (see below) the script only needs to run once!**
-* The script can be run either inside a Docker container (preferable) or locally.
+- **Becauce of caching (see below) the script only needs to run once!**
+- The script can be run either inside a Docker container (preferable) or locally.
 Running it locally requires the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli) to be installed.
 The Docker container already includes this requirement.
-* The script will prompt the user to provide a valid Hugging Face user access token, if not already logged in
-* By default, the assets are downloaded to `~/.cache/huggingface`; Hugging Face's default local cache dir (HF cache). 
-* The default `VOLUME_MOUNT` configuration synchronizes the local HF cache with that of the Docker container. 
-As a result, running `make download_assets` inside Docker saves the assets locally in the same location as described above. 
+- The script will prompt the user to provide a valid Hugging Face user access token, if not already logged in
+- By default, the assets are downloaded to `~/.cache/huggingface`; Hugging Face's default local cache dir (HF cache).
+- The default `VOLUME_MOUNT` configuration synchronizes the local HF cache with that of the Docker container.
+As a result, running `make download_assets` inside Docker saves the assets locally in the same location as described above.
 Conversely, any assets downloaded locally are automatically also available in the Docker container.
 
-## Running the FLUX.1-dev full-weight training
+## Running FLUX.1-dev full-weight training
 
-This project uses Accelerate as the training backend.
-Accelerate is a PyTorch library that supports multiple distributed training strategies, including DDP, FSDP, and DeepSpeed.
+The training and benchmarking runs can be conveniently started with the `launcher.py` utility, which we refer to as the *launcher*.
+See `python launcher.py --help` to view all launcher parameters.
 
-To train the model, use the following command:
+To train the model using the launcher, run the following command:
 
 ```bash
-accelerate launch --config_file=./config/accelerate_fsdp_config.yaml train.py [OPTIONS]
+python launcher.py --config_file=config/single_run.yaml [OPTIONS]
 ```
 
+By default, single runs use the `config/accelerate_config/fsdp_config.yaml` configuration, which utilizes FSDP across 8 GPUs and disables `torch.compile()`.
+
 **Options:**
-* `--batch_size=<int>`: Specifies the batch size for training. Replace <int> with the desired integer value. For example, --batch_size=32.
-* `--mixed_precision=<bf16, fp16, no>`: Sets the mixed precision mode. Choose one of the following options:
-  * `bf16`: Use bfloat16 precision.
-  * `fp16`: Use float16 precision.
-  * `no`: Do not use mixed precision.
-* Please see `python train.py --help` to view all training parameters.
-* Note that the python arguments come *after* `train.py`, as opposed to the `accelerate launch` parameters (e.g. `--config_file`) that come before `train.py`.
-* The file `config/accelerate_fsdp_config.yaml` should be provided, or otherwise Accelerate opts to use so-called default configuration.
-This configuration uses FSDP across 8 GPUs and disables `torch.compile()`.
+
+- `accelerate_config.mixed_precision=<bf16, fp16, no>`: Sets the mixed precision mode.
+Choose one of the following options:
+  - `bf16`: Use bfloat16 precision.
+  - `fp16`: Use float16 precision.
+  - `no`: Do not use mixed precision.
+- `train_args.train_batch_size=<int>`: Specifies the batch size for training.
+Replace `<int>` with the desired integer value.
+For example, `train_args.train_batch_size=32`.
+- `train_args.num_iterations=<int>`: Sets the number of training steps.
+- See `python train.py --help` to view the rest of the training parameters.
+They can be provided to the launcher with `+train_args.<parameter>=<value>` (notice the leading plus symbol).
 
 ### Creating a custom configuration
 
+This project uses Accelerate as the training backend.
+Accelerate is a PyTorch library that supports multiple distributed training strategies, including DDP, FSDP, and DeepSpeed.
 To create or modify an Accelerate configuration, run:
 
 ```bash
-accelerate config --config_file path/to/config
+accelerate config --config_file config/accelerate_config/your_config_name.yaml
 ```
 
-If a `--config_file` is not specified, the is by default saved in `$HF_HOME/accelerate/default_config.yaml`.
-
-## Benchmark results
-
-The benchmark is based on the `config/accelerate_fsdp_config.yaml` described above.
-This configuration uses Fully Sharded Data Parallel (FSDP) across 8x MI300X GPUs.
-The frames per second (FPS) for a single GPU using `bf16` precision are shown in the table below.
-
-| Precision | Single GPU FPS (batch size = 1) | Single GPU FPS (optimal batch size) |
-| --------- | ------------------------------- | ----------------------------------- |
-| bf16      | 2.03                            | 4.34 (batch size = 10)              |
-
-### Reproducing the benchmarks
-
-Reproducing the benchmark results is convenient with `launcher.py`. Run:
+The custom configuration can be used in the launcher by running:
 
 ```bash
-python launcher.py --param_config_file=config/full_benchmark_config.yaml
+python launcher.py accelerate_config=your_config_name [OPTIONS]
 ```
 
-which will automatically sweep the training script through a range of different parameter settings (precisions, batch sizes, etc.)
-* The default option `--param_config_file=config/minimal_benchmark_config.yaml` will run a minimal benchmark
-* See `python launcher.py --help` to view all launcher parameters.
-* The results will by default be stored to `outputs/runs`: one can view them with
+> **Note:**  If a `--config_file` is not specified, the configuration is by default saved in `$HF_HOME/accelerate/default_config.yaml`.
+> However, the launcher strictly expects all Accelerate configurations to be located in `config/accelerate_config/` for them to be usable.
+
+### Run the benchmarks
+
+To run the benchmark results using the launcher run:
+
+```bash
+python launcher.py --config_file=config/flux_full_benchmark.yaml
+```
+
+which will automatically sweep the training script through a range of different parameter settings (precisions, batch sizes, etc.) using Fully Sharded Data Parallel (FSDP) across 8x (MI300X) GPUs.
+
+- The default option `--config_file=config/flux_mini_benchmark.yaml` will run a minimal benchmark
+- The results will by default be stored to `outputs/runs`: one can view them with
 
   ```bash
   csvlook outputs/runs/sweep_000/runs_summary.csv
   ```
 
+The frames per second (FPS) for a single GPU using bf16 precision are shown in the table below.
+
+| Precision | Single GPU FPS (micro batch size = 1) | Single GPU FPS (optimal micro batch size) |
+| --------- | ------------------------------------- | ----------------------------------------- |
+| bf16      | 2.03                                  | 4.34 (micro batch size = 10)              |
+
 ## Training stability and convergence analysis
 
-The *pretrained* FLUX.1-dev model was finetuned using different precision modes on the pseudo camera 10k dataset in order to test training stability and loss convergence. 
+The *pretrained* FLUX.1-dev model was finetuned using different precision modes on the pseudo camera 10k dataset in order to test training stability and loss convergence.
 It is important to note that we started from a pretrained checkpoint, so radical loss convergence was not expected from the outset.
 
 The training was launched using the following command, varying the precision and learning rate as required.
 
 ```bash
-accelerate launch --config_file=./config/accelerate_fsdp_config.yaml train.py \
-  --num_iterations 1500 \
-  --learning_rate 1e-6 \
-  --train_batch_size 16 \
-  --mixed_precision bf16 \
-  --lr_scheduler cosine \
-  --lr_warmup_steps 150
+python launcher.py --config_file=config/single_run.yaml \
+  train_args.train_batch_size=16 \
+  train_args.num_iterations=1500 \
+  +train_args.learning_rate=1e-6 \
+  +train_args.lr_scheduler=cosine \
+  +train_args.lr_warmup_steps=150
 ```
 
-Full-precision (FP32, `--mixed_precision no`) training was performed with both low (`1e-6`) and high (`5e-5`) learning rates, as FP32’s higher numerical precision accommodates larger learning rates without numerical instability. 
-In both cases, the full-precision models showed clear loss convergence, whereas the mixed precision modes did not exhibit a definitive trend toward convergence or divergence. 
+Full-precision (FP32, `accelerate_config.mixed_precision=no`) training was performed with both low (`1e-6`) and high (`5e-5`) learning rates, as FP32’s higher numerical precision accommodates larger learning rates without numerical instability.
+In both cases, the full-precision models showed clear loss convergence, whereas the mixed precision modes did not exhibit a definitive trend toward convergence or divergence.
 The reduced precision in mixed precision training is thought to limit the ability to converge effectively.
 
-<p align="center">
-  <img src="./assets/loss_plot.png" width="600" height="350">
-</p>
+![Loss convergence plot comparing different precision modes](./assets/loss_plot.png)
 
 The following images are generated by the original model (left) and the FP32 finetuned model (lr=1e-6, right) using prompt "Bright neon sign in a busy city street, 'Open 24 Hours', bold typography, glowing lights" with a guidance scale of 3.5.
 
-<p align="center">
-  <img src="./assets/neon_sign.png" width="256" height="256" >
-  <img src="./assets/neon_sign_finetuned.png" width="256" height="256">
-</p>
+| Original Model | FP32 Finetuned Model |
+|:-------------:|:--------------------:|
+| ![Original model generated neon sign](./assets/neon_sign.png) | ![FP32 finetuned model generated neon sign](./assets/neon_sign_finetuned.png) |
+
+## Contributing
+
+Whether you're fixing bugs, adding new features, or improving documentation,
+we appreciate your efforts to make this project better.
+
+### Pre-commit hooks
+
+This project uses pre-commit hooks to enforce code quality standards and maintain consistency.
+These hooks automatically run before each commit to check and fix issues related to formatting, linting, and other quality checks.
+
+#### Setup
+
+Install and configure pre-commit:
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Set up the git hooks
+pre-commit install
+```
+
+#### Usage
+
+The hooks will run automatically on each commit.
+You can also run them manually:
+
+```bash
+# Run hooks on all files
+pre-commit run --all-files
+
+# Update hooks to latest versions (recommended periodically)
+pre-commit autoupdate
+
+# Run advanced linting and security checks (optional)
+pre-commit run --hook-stage manual --all-files
+```
+
+Our pre-commit configuration includes:
+
+- Code formatting and style enforcement
+- File cleanliness checks (whitespace, line endings, file validation)
+- Static code analysis and linting
+- Security vulnerability scanning (manual hook)
+- Automatic test execution
+
+> **Note:** Setting up pre-commit locally helps prevent CI pipeline failures, as these same checks will run when you create a pull request to the main branch.
+
+If pre-commit prevents your commit due to failures:
+
+1. Review the error messages
+2. Fix the identified issues (many hooks will automatically fix problems)
+3. Add the fixed files and try committing again
+
+### Testing
+
+Before opening a pull request, ensure that all new code is covered by tests.
+This is essential for maintaining the project's quality and reliability.
+You can run the test suite manually using:
+
+```bash
+make run_tests
+```
+
+Existing tests are run automatically as part of the pre-commit hooks when you commit changes.
+
+#### GPU-Dependent tests
+
+The project includes integration tests that require a GPU to run.
+These conditional tests verify that the pipelines work correctly on GPU hardware.
+When you run `make run_tests`, these GPU-dependent tests:
+
+- Run automatically on GPU-enabled machines
+- May take several minutes to complete
+- Are essential for verifying model functionality
+
+It's highly recommended to run these tests on a GPU-enabled machine before opening a pull request.
+
+If necessary, you can manually skip GPU-dependent tests with:
+
+```bash
+export SKIP_GPU_TESTS=1
+```

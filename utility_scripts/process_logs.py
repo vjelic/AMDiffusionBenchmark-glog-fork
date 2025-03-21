@@ -278,7 +278,7 @@ def process_run(
     with open(config_filename, "r") as f:
         config = yaml.safe_load(f)
     accelerate_config_params = config.get(ACCELERATE_CONFIG, {})
-    cli_args_params = config.get(CLI_ARGS, {})
+    train_args_params = config.get(CLI_ARGS, {})
 
     log_filename = os.path.join(output_dir, f"{run_id}_logs.txt")
     if os.path.exists(log_filename):
@@ -293,7 +293,7 @@ def process_run(
         RUN_ID: run_id,
         "timestamp": timestamp,
         **accelerate_config_params,
-        **cli_args_params,
+        **train_args_params,
         **metrics,
         **git_info,
     }
@@ -364,8 +364,12 @@ def print_summary_statistics(df: pd.DataFrame) -> None:
     pd.set_option("display.precision", 4)
     pd.set_option("display.expand_frame_repr", False)
 
-    # Only include columns that have more than one unique value
-    display_cols = [col for col in df.columns if df[col].nunique() > 1]
+    display_cols = list(df.columns)
+    if len(df) > 1:
+        # Only include columns that have more than one unique value
+        display_cols = [
+            col for col in df.columns if df[col].astype("str").nunique() > 1
+        ]
 
     logging.info("DataFrame Summary:")
     # Use to_string() for better formatting control

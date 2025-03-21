@@ -1,11 +1,12 @@
-from unittest.mock import patch, MagicMock
-import torch
-import numpy as np
+from pathlib import Path
+from unittest.mock import MagicMock
 
+import numpy as np
+import torch
 
 # Import the functions and classes to be tested
-from src.datasets import (
-    CacheDataset,
+from src.data.cache_dataset import CacheDataset
+from src.data.datasets_utils import (
     cache_collate_fn,
     collate_fn,
     preprocess_train,
@@ -108,6 +109,8 @@ def test_collate_fn():
         sample_dict = {
             "input_ids": torch.randn(48),
             "input_ids_2": torch.randn(16, 48),
+            "input_mask": torch.randn(48),
+            "input_mask_2": torch.randn(16, 48),
             "pixel_values": torch.randn(3, 4, 4),
         }
         examples.append(sample_dict)
@@ -118,6 +121,8 @@ def test_collate_fn():
     # Check output shapes and types
     assert collated_outputs["input_ids"].shape == (3, 48)
     assert collated_outputs["input_ids_2"].shape == (3, 16, 48)
+    assert collated_outputs["input_mask"].shape == (3, 48)
+    assert collated_outputs["input_mask_2"].shape == (3, 16, 48)
     assert collated_outputs["pixel_values"].shape == (3, 3, 4, 4)
 
     # Check outputs
@@ -136,7 +141,9 @@ def test_collate_cache_fn():
         latent = torch.randn(3, 16, 16)
         text_enc = torch.randn(48)
         text_enc2 = torch.randn(16, 48)
-        batch.append([latent, text_enc, text_enc2])
+        mask = torch.randn(48)
+        mask_2 = torch.randn(16, 48)
+        batch.append([latent, text_enc, text_enc2, mask, mask_2])
 
     # Collate input
     outputs = cache_collate_fn(batch)
@@ -145,9 +152,11 @@ def test_collate_cache_fn():
     assert outputs["latents"].shape == (3, 3, 16, 16)
     assert outputs["pooled_prompt_embeds"].shape == (3, 48)
     assert outputs["prompt_embeds"].shape == (3, 16, 48)
+    assert outputs["input_mask"].shape == (3, 48)
+    assert outputs["input_mask_2"].shape == (3, 16, 48)
 
 
-def test_cache_dataset(tmp_path):
+def test_cache_dataset(tmp_path: Path):
     """
     Verify that the dataset class is capable of streaming the information in saved python files.
     Check that the saved data aligns with the loaded data.
@@ -156,14 +165,18 @@ def test_cache_dataset(tmp_path):
     latents = torch.randn(3, 3, 16, 16)
     text_enc = torch.randn(3, 48)
     text_enc2 = torch.randn(3, 16, 48)
+    mask = torch.randn(3, 48)
+    mask_2 = torch.randn(3, 16, 48)
 
     # Save data for dataset to load
     np.save(tmp_path / "latents.npy", latents)
     np.save(tmp_path / "pooled_prompt_embeds.npy", text_enc)
     np.save(tmp_path / "prompt_embeds.npy", text_enc2)
+    np.save(tmp_path / "input_mask.npy", mask)
+    np.save(tmp_path / "input_mask_2.npy", mask_2)
 
     # Check if data was successfully loaded
-    dataset = CacheDataset(tmp_path)
+    dataset = CacheDataset(tmp_path, torch.float32)
     assert len(dataset) == 3
 
     # Check if data can be properly accessed
@@ -174,3 +187,7 @@ def test_cache_dataset(tmp_path):
         assert (text_enc[i] == data[1]).all()
         assert data[2].shape == (16, 48)
         assert (text_enc2[i] == data[2]).all()
+        assert data[3].shape == (48,)
+        assert (mask[i] == data[3]).all()
+        assert data[4].shape == (16, 48)
+        assert (mask_2[i] == data[4]).all()

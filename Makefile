@@ -7,44 +7,70 @@ endif
 
 HF_HOME ?= ~/.cache/huggingface
 
-.PHONY: download_assets build_docker launch_docker build_and_launch_docker exec_docker
+-include local.mk # include custom makefile
+
+.PHONY: download_assets build_docker launch_docker build_and_launch_docker exec_docker stop_docker submit_launcher_job run_tests
 
 # Target to download the assets
 download_assets:
 	# login into HF if needed
 	@if [ ! -f "$(HF_HOME)/token" ]; then \
 		echo "You are not logged in. Please log in to Hugging Face."; \
-		huggingface-cli login; \
+		if [ -n "$(HF_TOKEN)" ]; then \
+			echo "Logging in with the provided token"; \
+			huggingface-cli login --token $(HF_TOKEN); \
+		else \
+			huggingface-cli login; \
+		fi \
 	fi
-	# download the model and checkpoints
+	# download pseudo-camera-10k dataset
 	@echo "\033[1;31mDownloading bghira/pseudo-camera-10k dataset\033[0m"
 	huggingface-cli download --repo-type=dataset bghira/pseudo-camera-10k
-	# download the model and checkpoints
+
+	# download FLUX
 	@echo "\033[1;31mDownloading black-forest-labs/FLUX.1-dev\033[0m"
 	huggingface-cli download black-forest-labs/FLUX.1-dev
+
+	# download stable-diffusion-xl model and checkpoints
+	@echo "\033[1;31mDownloading stabilityai/stable-diffusion-xl-base-1.0\033[0m"
+	huggingface-cli download stabilityai/stable-diffusion-xl-base-1.0
+
+	# download Disney-VideoGeneration-Dataset
+	@echo "\033[1;31mDownloading Wild-Heart/Disney-VideoGeneration-Dataset\033[0m"
+	huggingface-cli download --repo-type=dataset Wild-Heart/Disney-VideoGeneration-Dataset
+
+	# download HunyuanVideo
+	@echo "\033[1;31mDownloading hunyuanvideo-community/HunyuanVideo\033[0m"
+	huggingface-cli download hunyuanvideo-community/HunyuanVideo
+
 	@echo "\033[1;31mDownloading completed.\033[0m"
 
 # Target to build the Docker image
 build_docker:
 	@echo "\033[1;31mBuilding Docker image with name: $(IMAGE_NAME)\033[0m"
-	docker build -f Dockerfile -t $(IMAGE_NAME) .
+	@if [ "$$(docker ps -a -q -f name=$(CONTAINER_NAME))" ]; then \
+		echo "\033[1;31mContainer $(CONTAINER_NAME) is already running.\033[0m"; \
+		echo -n "Do you want to stop the container? [y/N]: "; \
+		read answer; \
+		case $$answer in \
+			[Yy]*) \
+				$(MAKE) stop_docker; \
+				;; \
+			*) \
+				echo "Cannot proceed with building a new container while the existing one is running."; \
+				exit 1; \
+				;; \
+		esac; \
+	fi
+	docker build -f Dockerfile.rocm -t $(IMAGE_NAME) .
 
 # Target to launch the Docker container
 launch_docker:
-	@echo "\033[1;31mLaunching Docker container:\033[0m"
-	docker run \
-		-v $(VOLUME_MOUNT) \
-		--device=/dev/kfd \
-		--device=/dev/dri \
-		-d \
-		--rm \
-		--user root \
-		--network=host \
-		--ipc=host \
-		--privileged \
-		--name $(CONTAINER_NAME) \
-		$(IMAGE_NAME) \
-		tail -f /dev/null
+	@echo "\033[1;31mLaunching Docker container\033[0m"
+	CONTAINER_NAME=$(CONTAINER_NAME) \
+	IMAGE_NAME=$(IMAGE_NAME) \
+	VOLUME_MOUNT=$(VOLUME_MOUNT) \
+	bash utility_scripts/launch_docker_container.sh
 
 # Target to build and then launch the Docker container
 build_and_launch_docker:
@@ -59,3 +85,19 @@ exec_docker:
 		exec bash \
 	'
 
+# Target to stop the Docker container
+stop_docker:
+	@if [ "$$(docker ps -a -q -f name=$(CONTAINER_NAME))" ]; then \
+		echo "\033[1;31mStopping existing container: $(CONTAINER_NAME)\033[0m"; \
+		docker stop $(CONTAINER_NAME) 2>/dev/null || true; \
+	else \
+		echo "\033[1;31mNo existing container found: $(CONTAINER_NAME)\033[0m"; \
+	fi
+
+run_tests:
+	# Run tests cross-platform (Windows/Linux)
+	if [ "$$(uname)" = "Windows_NT" ]; then \
+		set PYTHONPATH=. && pytest ./tests; \
+	else \
+		PYTHONPATH=. pytest ./tests; \
+	fi

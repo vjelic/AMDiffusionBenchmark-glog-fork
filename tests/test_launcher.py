@@ -29,76 +29,29 @@ def test_parse_args_no_args():
         launcher.parse_args()
 
 
-def test_set_nested_value():
-    """
-    Test that launcher.set_nested_value correctly sets a nested key in a dictionary.
-    """
-    dictionary = {}
-    keys = ["outer", "inner", "final"]
-    value = "test_value"
-    launcher.set_nested_value(dictionary, keys, value)
-    assert dictionary == {"outer": {"inner": {"final": "test_value"}}}
-
-
-def test_update_accelerate_config():
-    """
-    Test update_accelerate_config by creating a temporary template
-    and verifying updates occur.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        template_path = os.path.join(tmpdir, "template.yaml")
-        output_path = os.path.join(tmpdir, "updated.yaml")
-
-        # Write a simple template
-        with open(template_path, "w") as f:
-            yaml.dump(
-                {
-                    "fsdp_config": {"fsdp_sharding_strategy": "SHARD_GRAD_OP"},
-                    "dynamo_config": {
-                        "dynamo_backend": "inductor",
-                        "dynamo_mode": "default",
-                    },
-                },
-                f,
-            )
-
-        override_params = {
-            "fsdp_config.fsdp_sharding_strategy": "FULL_SHARD",
-            "dynamo_config.dynamo_backend": "no",
-        }
-        launcher.update_accelerate_config(template_path, override_params, output_path)
-
-        with open(output_path, "r") as f:
-            updated = yaml.safe_load(f)
-
-        assert updated["fsdp_config"]["fsdp_sharding_strategy"] == "FULL_SHARD"
-        assert updated["dynamo_config"]["dynamo_backend"] == "no"
-        assert updated["dynamo_config"]["dynamo_mode"] == "default"
-
-
 def test_load_yaml_config():
     """
     Test loading a YAML config from a file.
     """
-    sample_param_config = {
+    sample_config = {
         launcher.ACCELERATE_CONFIG: {
             "fsdp_config.fsdp_sharding_strategy": ["FULL_SHARD"],
         },
-        launcher.CLI_ARGS: {"mixed_precision": ["bf16", "fp16"]},
+        launcher.CLI_ARGS: {"model": ["flux", "stable-diffusion-xl"]},
     }
     with tempfile.TemporaryDirectory() as tmpdir:
         config_path = os.path.join(tmpdir, "params.yaml")
         with open(config_path, "w") as f:
-            yaml.dump(sample_param_config, f)
+            yaml.dump(sample_config, f)
 
         loaded = launcher.load_yaml_config(config_path)
         assert launcher.ACCELERATE_CONFIG in loaded
         assert launcher.CLI_ARGS in loaded
         assert (
             loaded[launcher.ACCELERATE_CONFIG]
-            == sample_param_config[launcher.ACCELERATE_CONFIG]
+            == sample_config[launcher.ACCELERATE_CONFIG]
         )
-        assert loaded[launcher.CLI_ARGS] == sample_param_config[launcher.CLI_ARGS]
+        assert loaded[launcher.CLI_ARGS] == sample_config[launcher.CLI_ARGS]
 
 
 def test_generate_combinations():
@@ -159,12 +112,12 @@ def test_build_command():
     the accelerate CLI command correctly.
     """
     accelerate_config_path = "test_accelerate.yaml"
-    cli_args_params = {
-        "mixed_precision": "fp16",
+    train_args_params = {
+        "model": "flux",
         "train_batch_size": 2,
         "use_cache": True,
     }
-    cmd = launcher.build_command(accelerate_config_path, cli_args_params)
+    cmd = launcher.build_command(accelerate_config_path, train_args_params)
     assert cmd[:5] == [
         "accelerate",
         "launch",
@@ -174,8 +127,8 @@ def test_build_command():
     ]
     # Boolean argument -> flag only if True
     assert "--use_cache" in cmd
-    assert "--mixed_precision" in cmd
-    assert "fp16" in cmd
+    assert "--model" in cmd
+    assert "flux" in cmd
     assert "--train_batch_size" in cmd
     assert "2" in cmd
 
@@ -190,8 +143,7 @@ def test_main_dry_run(mock_subprocess_run, mock_parse_args):
     """
     # Mock launcher.parse_args to return minimal valid arguments
     mock_args = argparse.Namespace(
-        param_config_file=None,
-        accelerate_config_template="fake_accel_template.yaml",
+        config_file=None,
         output_dir="test_outputs",  # Will override with tmpdir below
         dry_run=True,
         resume=False,
@@ -206,7 +158,6 @@ def test_main_dry_run(mock_subprocess_run, mock_parse_args):
 
         with (
             patch("launcher.load_configurations") as mock_load_conf,
-            patch("launcher.update_accelerate_config"),
             patch("launcher.save_configuration"),
             patch("launcher.save_dataframe"),
             patch(
@@ -216,16 +167,16 @@ def test_main_dry_run(mock_subprocess_run, mock_parse_args):
         ):
 
             # Fake combinations
-            mock_load_conf.return_value = [
+            mock_conf = [
                 {
                     "accelerate_config": {
                         "fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"
                     },
-                    "cli_args": {"mixed_precision": "bf16"},
+                    "train_args": {"model": "flux"},
                 }
             ]
 
-            launcher.main()
+            launcher.main(mock_args, mock_conf)
 
     # Dry-run => no real subprocess calls
     mock_subprocess_run.assert_not_called()
@@ -234,10 +185,10 @@ def test_main_dry_run(mock_subprocess_run, mock_parse_args):
 def test_save_configuration():
     """
     Ensure that launcher.save_configuration writes out the combined config
-    with launcher.accelerate_config + cli_args as YAML.
+    with launcher.ACCELERATE_CONFIG + CLI_ARGS as YAML.
     """
     accel_params = {"fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"}
-    cli_params = {"mixed_precision": "bf16"}
+    cli_params = {"model": "flux"}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         config_file = os.path.join(tmpdir, "test_config.yaml")
@@ -296,10 +247,13 @@ def test_should_skip_already_done_no_skip_unknown():
     assert should_skip is False
 
 
-def test_should_skip_obvious_ooms_true():
+@patch("launcher.save_dataframe")
+def test_should_skip_obvious_ooms_true_batch_size(mock_save_dataframe):
     """
     If a smaller batch size OOMed with the same config,
     and current run uses bigger batch_size => skip.
+    Additionally, verify that save_dataframe is called with the updated DF
+    containing the new row with launcher.STATUS_OOM_SKIPPED.
     """
     # We'll store a row with launcher.train_batch_size=1, status=OOM
     # and matching launcher.accelerate_config + CLI except for the batch size.
@@ -307,27 +261,83 @@ def test_should_skip_obvious_ooms_true():
         launcher.RUN_ID: 1,
         launcher.STATUS: launcher.STATUS_OOM,
         launcher.TRAIN_BATCH_SIZE: 1,
-        "mixed_precision": "bf16",
-        # Hypothetical launcher.accelerate_config fields
+        "model": "flux",
         "fsdp_config.fsdp_sharding_strategy": "FULL_SHARD",
+        "resolution": "960,544",
     }
     df = pd.DataFrame([prior_data])
 
     accelerate_config_params = {"fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"}
-    cli_args_params = {
-        "mixed_precision": "bf16",
+    train_args_params = {
+        "model": "flux",
         launcher.TRAIN_BATCH_SIZE: 2,  # bigger => should skip
+        "resolution": "960,544",
     }
     # We'll call it launcher.run_id=2
     out = launcher.should_skip_obvious_ooms(
         df,
         2,
+        launcher.TRAIN_BATCH_SIZE,
         accelerate_config_params,
-        cli_args_params,
+        train_args_params,
         "outputs",
         {"git_hash": "abc", "git_user": "me"},
     )
-    assert out is True, "Expected to skip because smaller BS 1 OOMed previously."
+    assert (
+        out is True
+    ), f"Expected to skip because smaller {launcher.TRAIN_BATCH_SIZE=} OOMed previously."
+
+    # Verify that save_dataframe was called
+    mock_save_dataframe.assert_called_once()
+    # Verify that the saved DF contains a new row for run 2 with status OOM_SKIPPED
+    saved_df = mock_save_dataframe.call_args[0][0]
+    assert 2 in saved_df[launcher.RUN_ID].values
+    row = saved_df[saved_df[launcher.RUN_ID] == 2].iloc[0]
+    assert row[launcher.STATUS] == launcher.STATUS_OOM_SKIPPED
+
+
+@patch("launcher.save_dataframe")
+def test_should_skip_obvious_ooms_true_num_frames(mock_save_dataframe):
+    """
+    If a smaller num_frames configuration OOMed with the same config,
+    and current run uses bigger num_frames => skip.
+    Verify that save_dataframe is called with the updated DF.
+    """
+    prior_data = {
+        launcher.RUN_ID: 1,
+        launcher.STATUS: launcher.STATUS_OOM,
+        launcher.NUM_FRAMES: 10,
+        "model": "flux",
+        "fsdp_config.fsdp_sharding_strategy": "FULL_SHARD",
+        "resolution": "960,544",
+    }
+    df = pd.DataFrame([prior_data])
+
+    accelerate_config_params = {"fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"}
+    train_args_params = {
+        "model": "flux",
+        launcher.NUM_FRAMES: 12,  # bigger => should skip
+        "resolution": "960,544",
+    }
+    # We'll call it launcher.run_id=2
+    out = launcher.should_skip_obvious_ooms(
+        df,
+        2,
+        launcher.NUM_FRAMES,
+        accelerate_config_params,
+        train_args_params,
+        "outputs",
+        {"git_hash": "abc", "git_user": "me"},
+    )
+    assert (
+        out is True
+    ), f"Expected to skip because smaller {launcher.NUM_FRAMES=} OOMed previously."
+
+    mock_save_dataframe.assert_called_once()
+    saved_df = mock_save_dataframe.call_args[0][0]
+    assert 2 in saved_df[launcher.RUN_ID].values
+    row = saved_df[saved_df[launcher.RUN_ID] == 2].iloc[0]
+    assert row[launcher.STATUS] == launcher.STATUS_OOM_SKIPPED
 
 
 def test_should_skip_obvious_ooms_false_different_config():
@@ -341,30 +351,31 @@ def test_should_skip_obvious_ooms_false_different_config():
         launcher.RUN_ID: 1,
         launcher.STATUS: launcher.STATUS_OOM,
         launcher.TRAIN_BATCH_SIZE: 1,
-        "mixed_precision": "bf16",
+        "model": "flux",
         # Hypothetical launcher.accelerate_config fields
         "fsdp_config.fsdp_sharding_strategy": "FULL_SHARD",
     }
     df = pd.DataFrame([prior_data])
 
     accelerate_config_params = {"fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"}
-    cli_args_params = {
-        "mixed_precision": "fp16",  # DIFFERENT!
+    train_args_params = {
+        "model": "stable-diffusion-xl",  # DIFFERENT!
         launcher.TRAIN_BATCH_SIZE: 2,
     }
     # We'll call it launcher.run_id=2
     out = launcher.should_skip_obvious_ooms(
         df,
         2,
+        launcher.TRAIN_BATCH_SIZE,
         accelerate_config_params,
-        cli_args_params,
+        train_args_params,
         "outputs",
         {"git_hash": "abc", "git_user": "me"},
     )
     assert out is False
 
 
-def test_should_skip_obvious_ooms_false_no_smaller_bs():
+def test_should_skip_obvious_ooms_false_no_smaller_config():
     """
     If no smaller batch size has OOMed with same config, do not skip.
     """
@@ -378,22 +389,23 @@ def test_should_skip_obvious_ooms_false_no_smaller_bs():
         ]
     )
     accelerate_config_params = {"fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"}
-    cli_args_params = {
-        "mixed_precision": "bf16",
+    train_args_params = {
+        "model": "flux",
         launcher.TRAIN_BATCH_SIZE: 2,
     }
     out = launcher.should_skip_obvious_ooms(
         df,
         2,
+        launcher.TRAIN_BATCH_SIZE,
         accelerate_config_params,
-        cli_args_params,
+        train_args_params,
         "outputs",
         {"git_hash": "abc", "git_user": "me"},
     )
     assert out is False
 
 
-def test_should_skip_obvious_ooms_false_same_bs():
+def test_should_skip_obvious_ooms_false_same_feature():
     """
     If the run that OOMed had the same (not smaller) batch size,
     should not skip the new run.
@@ -408,12 +420,13 @@ def test_should_skip_obvious_ooms_false_same_bs():
         ]
     )
     accelerate_config_params = {}
-    cli_args_params = {launcher.TRAIN_BATCH_SIZE: 2}
+    train_args_params = {launcher.TRAIN_BATCH_SIZE: 2}
     out = launcher.should_skip_obvious_ooms(
         df,
         2,
+        launcher.TRAIN_BATCH_SIZE,
         accelerate_config_params,
-        cli_args_params,
+        train_args_params,
         "outputs",
         {},
     )
@@ -426,25 +439,24 @@ def test_should_skip_obvious_ooms_false_empty_df():
     """
     df = pd.DataFrame()
     accelerate_config_params = {}
-    cli_args_params = {launcher.TRAIN_BATCH_SIZE: 2}
+    train_args_params = {launcher.TRAIN_BATCH_SIZE: 2}
     out = launcher.should_skip_obvious_ooms(
         df,
         2,
+        launcher.TRAIN_BATCH_SIZE,
         accelerate_config_params,
-        cli_args_params,
+        train_args_params,
         "outputs",
         {},
     )
     assert out is False
 
 
-@patch("launcher.update_accelerate_config")
 @patch("launcher.save_configuration")
-def test_prepare_run_configurations(mock_save_conf, mock_update_accel):
+def test_prepare_run_configurations(mock_save_conf):
     """
     Validate that for each combination, we call:
-      launcher.accelerate_config
-      launcher.save_configuration
+      launcher.ACCELERATE_CONFIG and launcher.save_configuration
     with correct file names.
     """
     combos = [
@@ -461,18 +473,12 @@ def test_prepare_run_configurations(mock_save_conf, mock_update_accel):
         # We just want to test calls, no actual file writes
 
         launcher.prepare_run_configurations(
-            combos, output_dir=tmpdir, accelerate_template="my_template.yaml"
+            combos,
+            output_dir=tmpdir,
         )
 
-    # For each combination, we call launcher.update_accelerate_config once
-    # and launcher.save_configuration once
-    assert mock_update_accel.call_count == 2
+    # For each combination, save_configuration should be called once.
     assert mock_save_conf.call_count == 2
-
-    # TODO
-    # We can the calls more precisely if you want:
-    # calls = [call(args...) ...]
-    # assert mock_update_accel.mock_calls == calls
 
 
 @patch("launcher.should_skip_already_done", return_value=True)
@@ -489,7 +495,7 @@ def test_should_skip_true_already_done(mock_done):
     mock_done.assert_called_once()
 
 
-@patch("subprocess.run")
+@patch("launcher.subprocess.run")
 def test_run_training_normal(mock_subproc_run):
     """
     launcher.run_training should call subprocess.run with the specified command,
@@ -509,7 +515,7 @@ def test_run_training_normal(mock_subproc_run):
     assert "stderr" in called_kwargs
 
 
-@patch("subprocess.run", side_effect=Exception("test error"))
+@patch("launcher.subprocess.run", side_effect=Exception("test error"))
 def test_run_training_exception(mock_subproc_run, caplog):
     """
     If launcher.run_training triggers an exception, it should be logged.
@@ -536,13 +542,13 @@ def test_should_skip_false(mock_ooms, mock_done):
     out = launcher.should_skip(1, combination, args, df, {})
     assert out is False
     mock_done.assert_called_once()
-    mock_ooms.assert_called_once()
+    mock_ooms.assert_called()
 
 
 @patch("launcher.should_skip_already_done", return_value=False)
 @patch("launcher.should_skip_obvious_ooms", return_value=True)
 def test_should_skip_true_ooms(mock_ooms, mock_done):
-    """If skip_already_done=False but skip_obvious_ooms=True => True."""
+    """If skip_already_done is False but skip_obvious_ooms is True, then skip."""
     args = argparse.Namespace(
         resume=True,
         skip_larger_bs=True,
@@ -559,7 +565,7 @@ def test_should_skip_true_ooms(mock_ooms, mock_done):
 def test_run_training_dry_run(caplog):
     """
     In dry_run mode, launcher.run_training should NOT call subprocess.run
-    and logs that it's a dry run.
+    and should log that it's a dry run.
     """
     caplog.set_level(logging.INFO)
 
@@ -574,7 +580,7 @@ def test_run_training_dry_run(caplog):
 @patch("launcher.run_training")
 def test_execute_run(mock_run_training, caplog):
     """
-    'launcher.execute_run' calls launcher.run_training with the appropriate command
+    launcher.execute_run calls launcher.run_training with the appropriate command
     and logs "Starting run 3/10" at INFO level.
     """
     caplog.set_level(logging.INFO)
@@ -583,7 +589,7 @@ def test_execute_run(mock_run_training, caplog):
         launcher.ACCELERATE_CONFIG: {
             "fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"
         },
-        launcher.CLI_ARGS: {"mixed_precision": "bf16"},
+        launcher.CLI_ARGS: {"model": "flux"},
     }
     with tempfile.TemporaryDirectory() as tmpdir:
         args = argparse.Namespace(

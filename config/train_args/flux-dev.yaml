@@ -1,0 +1,10 @@
+defaults:
+  - defaults
+  - _self_
+
+model: flux-dev
+model_path: black-forest-labs/FLUX.1-dev
+train_data_path: bghira/pseudo-camera-10k
+train_batch_size: 10
+num_iterations: 100
+resolution: 512
