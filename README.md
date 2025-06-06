@@ -209,14 +209,12 @@ To reproduce the benchmark results using the launcher run:
 python launcher.py --config-name=flux_benchmark
 ```
 
-which will automatically sweep the training script through a range of different parameter settings (precisions, batch sizes, etc.)
+which will automatically sweep the training script through a range of different parameter settings (precisions, batch sizes, etc.).
+The results will by default be stored to `outputs/runs`: one can view them with
 
-- For a minimal benchmark use the option `--config-name=flux_mini_benchmark.yaml`
-- The results will by default be stored to `outputs/runs`: one can view them with
-
-  ```bash
-  csvlook outputs/runs/sweep_000/runs_summary.csv
-  ```
+```bash
+csvlook outputs/runs/sweep_000/runs_summary.csv
+```
 
 ## Training stability and convergence analysis
 
