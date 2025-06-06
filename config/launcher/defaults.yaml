@@ -1,0 +1,5 @@
+dry_run: false
+show_config: false
+warmup_steps: 5
+resume: false
+skip_larger_bs: true

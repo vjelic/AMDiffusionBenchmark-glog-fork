@@ -5,7 +5,8 @@ import torch
 import torch.distributed
 from dotenv import load_dotenv
 
-from src.trainer import ModelManager, Trainer
+from src.models import ModelManager
+from src.trainer import Trainer
 from src.utils import check_gpu_vendor, parse_resolution, safely_eval_as_bool
 
 # Load environment variables from a .env file
@@ -219,12 +220,6 @@ def parse_args():
         help="Maximum number of frames to train on at once. Only relevant for video models.",
     )
     parser.add_argument(
-        "--show_progress_bar",
-        default=os.getenv("SHOW_PROGRESS_BAR", "false"),
-        type=lambda x: safely_eval_as_bool(x),
-        help="Whether to show TQDM progress bar or not for training (only in main process). Accepts 'true', 'false', '1', or '0'.",
-    )
-    parser.add_argument(
         "--use_lora",
         default=os.getenv("USE_LORA", "false"),
         type=lambda x: safely_eval_as_bool(x),
@@ -237,10 +232,15 @@ def parse_args():
         help="The LoRA rank to use while training.",
     )
     parser.add_argument(
-        "--use_gradient_checkpointing",
-        default=os.getenv("USE_GRADIENT_CHECKPOINTING", "false"),
-        type=lambda x: safely_eval_as_bool(x),
-        help="Whether to use gradient checkpointing to save vram during training. Accepts 'true', 'false', '1', or '0'.",
+        "--gradient_checkpointing",
+        default=os.getenv("GRADIENT_CHECKPOINTING", 0),
+        type=float,
+        help=(
+            "Percentage of gradient checkpointing as a float between 0 (disabled) and 1 (full checkp.). "
+            "NB! If provided value is strictly between 0 and 1, "
+            "only the corresponding proportion of the transformer blocks will be checkpointed. "
+            "However, setting `gradient_checkpointing=1` checkpoints the whole model, not only the transf. blocks."
+        ),
     )
     parser.add_argument(
         "--local_rank",
@@ -258,7 +258,7 @@ def parse_args():
     parser.add_argument(
         "--logging_dir",
         type=str,
-        default=os.getenv("LOGGING_DIR", "logs"),
+        default=os.getenv("LOGGING_DIR", "outputs/runs"),
         help="Experiment tracker (see args.report_to) log directory. Defaults to `logs`.",
     )
     parser.add_argument(
@@ -270,7 +270,7 @@ def parse_args():
     parser.add_argument(
         "--profiling_logging_dir",
         type=str,
-        default=os.getenv("PROFILING_LOGGING_DIR", "logs/traces"),
+        default=os.getenv("PROFILING_LOGGING_DIR", "outputs/runs/profile"),
         help="The logging directory where the profiling trace-files (JSON) will be written.",
     )
     args = parser.parse_args()
@@ -278,8 +278,8 @@ def parse_args():
         args.cache_dir,
         f"{args.model}-{'x'.join(map(str, args.resolution))}",
     )
-    _, model_type = ModelManager().get_model(args.model)
-    if model_type == "video":
+    _, _, model_output_type = ModelManager().get_model(args.model)
+    if model_output_type == "video":
         args.cache_dir += f"x{args.num_frames}"
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))

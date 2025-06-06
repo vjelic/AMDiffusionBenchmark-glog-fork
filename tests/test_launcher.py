@@ -1,12 +1,12 @@
-import argparse
 import logging
 import os
+import re
 import tempfile
 from unittest.mock import patch
 
 import pandas as pd
-import pytest
 import yaml
+from omegaconf import OmegaConf
 
 import launcher
 
@@ -14,44 +14,33 @@ import launcher
 os.environ["DISABLE_RUNS_SUMMARY"] = "1"
 
 
-def test_parse_args_no_args():
+@patch("hydra.initialize")
+@patch("hydra.compose")
+def test_hydra_config_loading(mock_compose, mock_initialize, caplog):
     """
-    Test launcher.parse_args with no command-line arguments,
-    which should raise a SystemExit if the default files
-    do not exist (mocked via os.path.isfile=False).
+    Test that Hydra configuration is loaded correctly with default values
+    when no overrides are provided.
     """
-    test_argv = []
-    with (
-        patch("sys.argv", ["launcher.py"] + test_argv),
-        patch("launcher.os.path.isfile", return_value=False),
-        pytest.raises(SystemExit),
-    ):
-        launcher.parse_args()
+    # Create a simple mock config
+    mock_config = OmegaConf.create(
+        {
+            "launcher": {
+                "dry_run": False,
+                "resume": False,
+                "skip_larger_bs": False,
+                "warmup_steps": 5,
+                "show_config": True,  # keep this true to avoid executing the main logic
+            },
+            "train_args": {
+                "logging_dir": "test_output_dir",
+                "profiling_logging_dir": "test_output_dir",
+            },
+        }
+    )
 
-
-def test_load_yaml_config():
-    """
-    Test loading a YAML config from a file.
-    """
-    sample_config = {
-        launcher.ACCELERATE_CONFIG: {
-            "fsdp_config.fsdp_sharding_strategy": ["FULL_SHARD"],
-        },
-        launcher.CLI_ARGS: {"model": ["flux", "stable-diffusion-xl"]},
-    }
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = os.path.join(tmpdir, "params.yaml")
-        with open(config_path, "w") as f:
-            yaml.dump(sample_config, f)
-
-        loaded = launcher.load_yaml_config(config_path)
-        assert launcher.ACCELERATE_CONFIG in loaded
-        assert launcher.CLI_ARGS in loaded
-        assert (
-            loaded[launcher.ACCELERATE_CONFIG]
-            == sample_config[launcher.ACCELERATE_CONFIG]
-        )
-        assert loaded[launcher.CLI_ARGS] == sample_config[launcher.CLI_ARGS]
+    caplog.set_level(logging.INFO)
+    launcher.main(mock_config)
+    assert OmegaConf.to_yaml(mock_config).strip() in caplog.text.strip()
 
 
 def test_generate_combinations():
@@ -72,38 +61,6 @@ def test_generate_combinations():
         {"param1": 2, "param2": "B"},
     ]
     assert combos == expected
-
-
-def test_combine_configurations():
-    """
-    Test that accelerate + CLI combos are combined properly
-    without making assumptions about order.
-    """
-    accel_combos = [{"accel1": "a"}, {"accel1": "b"}]
-    cli_combos = [{"cli1": 1}, {"cli1": 2}]
-    combined = launcher.combine_configurations(accel_combos, cli_combos)
-
-    # Check we get the expected number of combinations
-    assert len(combined) == 4
-
-    # Create set of expected combinations
-    expected = {
-        (("accel1", "a"), ("cli1", 1)),
-        (("accel1", "a"), ("cli1", 2)),
-        (("accel1", "b"), ("cli1", 1)),
-        (("accel1", "b"), ("cli1", 2)),
-    }
-
-    # Convert actual results to comparable tuples
-    actual = {
-        tuple(
-            sorted(c[launcher.ACCELERATE_CONFIG].items())
-            + sorted(c[launcher.CLI_ARGS].items())
-        )
-        for c in combined
-    }
-
-    assert actual == expected
 
 
 def test_build_command():
@@ -133,50 +90,56 @@ def test_build_command():
     assert "2" in cmd
 
 
-@patch("launcher.parse_args")
+@patch("hydra.compose")
 @patch("launcher.subprocess.run")
-def test_main_dry_run(mock_subprocess_run, mock_parse_args):
+def test_main_dry_run(mock_subprocess_run, mock_compose):
     """
     Test launcher.main function in dry-run mode.
     Ensures no actual subprocess is called and we have at least
     one row in the DataFrame so 'status_counts' won't be empty.
     """
-    # Mock launcher.parse_args to return minimal valid arguments
-    mock_args = argparse.Namespace(
-        config_file=None,
-        output_dir="test_outputs",  # Will override with tmpdir below
-        dry_run=True,
-        resume=False,
-        skip_larger_bs=False,
-        warmup_steps=5,
-    )
-    mock_parse_args.return_value = mock_args
-
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Override the output_dir to ensure all artifacts go in tmpdir
-        mock_args.output_dir = tmpdir
+        # Create a mock config with dry_run=True and logging_dir set to tmpdir
+        mock_config = OmegaConf.create(
+            {
+                "launcher": {
+                    "dry_run": True,
+                    "resume": False,
+                    "skip_larger_bs": False,
+                    "warmup_steps": 5,
+                    "show_config": False,
+                },
+                "train_args": {
+                    "logging_dir": tmpdir,  # Use tmpdir as the logging directory
+                    "profiling_logging_dir": tmpdir,
+                },
+            }
+        )
+
+        mock_compose.return_value = mock_config
 
         with (
-            patch("launcher.load_configurations") as mock_load_conf,
+            patch(
+                "launcher.generate_combinations",
+                return_value=[
+                    {
+                        "accelerate_config": {
+                            "fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"
+                        },
+                        "train_args": {"model": "flux"},
+                    }
+                ],
+            ),
             patch("launcher.save_configuration"),
             patch("launcher.save_dataframe"),
             patch(
                 "launcher.generate_dataframe",
                 return_value=pd.DataFrame([{"status": "DRY_RUN"}]),
             ),
+            patch("launcher.print_summary_statistics"),
         ):
-
-            # Fake combinations
-            mock_conf = [
-                {
-                    "accelerate_config": {
-                        "fsdp_config.fsdp_sharding_strategy": "FULL_SHARD"
-                    },
-                    "train_args": {"model": "flux"},
-                }
-            ]
-
-            launcher.main(mock_args, mock_conf)
+            # Call main with no arguments (Hydra will use the mocked config)
+            launcher.main(mock_config)
 
     # Dry-run => no real subprocess calls
     mock_subprocess_run.assert_not_called()
@@ -486,16 +449,27 @@ def test_should_skip_true_already_done(mock_done):
     """
     If the run was already done, we skip directly without checking OOM logic.
     """
-    args = argparse.Namespace(resume=True, skip_larger_bs=True)
+
+    # Create a Hydra-style config
+    cfg = OmegaConf.create(
+        {
+            "launcher": {"resume": True, "skip_larger_bs": True},
+            "train_args": {
+                "logging_dir": "test_output_dir",
+                "profiling_logging_dir": "test_output_dir",
+            },
+        }
+    )
+
     df = pd.DataFrame()
     combination = {}
 
-    skip_result = launcher.should_skip(5, combination, args, df, {})
+    skip_result = launcher.should_skip(5, combination, cfg, df, {})
     assert skip_result is True
     mock_done.assert_called_once()
 
 
-@patch("launcher.subprocess.run")
+@patch("launcher.subprocess.Popen")
 def test_run_training_normal(mock_subproc_run):
     """
     launcher.run_training should call subprocess.run with the specified command,
@@ -515,7 +489,7 @@ def test_run_training_normal(mock_subproc_run):
     assert "stderr" in called_kwargs
 
 
-@patch("launcher.subprocess.run", side_effect=Exception("test error"))
+@patch("launcher.subprocess.Popen", side_effect=Exception("test error"))
 def test_run_training_exception(mock_subproc_run, caplog):
     """
     If launcher.run_training triggers an exception, it should be logged.
@@ -532,14 +506,19 @@ def test_run_training_exception(mock_subproc_run, caplog):
 @patch("launcher.should_skip_obvious_ooms", return_value=False)
 def test_should_skip_false(mock_ooms, mock_done):
     """If both sub-checks are False, final skip is False."""
-    args = argparse.Namespace(
-        resume=True,
-        skip_larger_bs=True,
-        output_dir="some_dir",
+
+    cfg = OmegaConf.create(
+        {
+            "launcher": {"resume": True, "skip_larger_bs": True},
+            "train_args": {
+                "logging_dir": "test_output_dir",
+                "profiling_logging_dir": "test_output_dir",
+            },
+        }
     )
     df = pd.DataFrame([{launcher.RUN_ID: 1, launcher.STATUS: launcher.STATUS_SUCCESS}])
     combination = {launcher.ACCELERATE_CONFIG: {}, launcher.CLI_ARGS: {}}
-    out = launcher.should_skip(1, combination, args, df, {})
+    out = launcher.should_skip(1, combination, cfg, df, {})
     assert out is False
     mock_done.assert_called_once()
     mock_ooms.assert_called()
@@ -549,14 +528,20 @@ def test_should_skip_false(mock_ooms, mock_done):
 @patch("launcher.should_skip_obvious_ooms", return_value=True)
 def test_should_skip_true_ooms(mock_ooms, mock_done):
     """If skip_already_done is False but skip_obvious_ooms is True, then skip."""
-    args = argparse.Namespace(
-        resume=True,
-        skip_larger_bs=True,
-        output_dir="some_dir",
+
+    cfg = OmegaConf.create(
+        {
+            "launcher": {"resume": True, "skip_larger_bs": True},
+            "train_args": {
+                "logging_dir": "test_output_dir",
+                "profiling_logging_dir": "test_output_dir",
+            },
+        }
     )
+
     df = pd.DataFrame([{launcher.RUN_ID: 123}])
     combination = {launcher.ACCELERATE_CONFIG: {}, launcher.CLI_ARGS: {}}
-    out = launcher.should_skip(2, combination, args, df, {})
+    out = launcher.should_skip(2, combination, cfg, df, {})
     assert out is True
     mock_done.assert_called_once()
     mock_ooms.assert_called_once()
@@ -592,16 +577,20 @@ def test_execute_run(mock_run_training, caplog):
         launcher.CLI_ARGS: {"model": "flux"},
     }
     with tempfile.TemporaryDirectory() as tmpdir:
-        args = argparse.Namespace(
-            output_dir=tmpdir,
-            dry_run=False,
-            warmup_steps=5,
-            resume=False,
-            skip_larger_bs=False,
+        cfg = OmegaConf.create(
+            {
+                "launcher": {
+                    "dry_run": False,
+                    "warmup_steps": 5,
+                    "resume": False,
+                    "skip_larger_bs": False,
+                },
+                "train_args": {"logging_dir": tmpdir, "profiling_logging_dir": tmpdir},
+            }
         )
+
         df = pd.DataFrame()
-        updated_df = launcher.execute_run(3, 10, combo, args, df)
+        updated_df = launcher.execute_run(3, 10, combo, cfg, df)
         assert updated_df is df
     mock_run_training.assert_called_once()
-
-    assert "Starting run 3/10" in caplog.text
+    assert re.search(r"Starting run 3_.*\/10", caplog.text)

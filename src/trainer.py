@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import functools
 import random
 import time
 from datetime import datetime
@@ -9,59 +10,32 @@ from typing import Union
 import accelerate
 import datasets
 import diffusers
-import numpy as np
 import torch
 import torch.distributed
-import torch.nn.functional as F
 import torch.optim.optimizer
 import transformers
 from accelerate import Accelerator, ProfileKwargs
 from accelerate.utils import DummyOptim, DummyScheduler, DynamoBackend, set_seed
 from diffusers.optimization import get_scheduler
 from diffusers.utils import export_to_video
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    CheckpointImpl,
+    apply_activation_checkpointing,
+    checkpoint_wrapper,
+)
 from torch.utils.flop_counter import FlopCounterMode
 from torchvision import transforms
 from tqdm import tqdm
 from transformers import logging as hf_logging
 
-import src.models
-from src.data.cache_dataset import CacheDataset
-from src.data.datasets_utils import cache_collate_fn, collate_fn, preprocess_train
+from src.data.cache_dataset import CacheDataset, create_or_append_to_xr_dataset
+from src.data.datasets_utils import collate_fn, preprocess_train
+from src.models import ModelManager
+from src.models.base import BaseModel
 from src.utils import configure_logging
 
 # Configure the logger for outputs to terminal
 logger = configure_logging()
-
-
-class ModelManager:
-    def __init__(self):
-        """Initialize model manager with the available models mapping."""
-        self.model_mapping = {
-            "flux-dev": {
-                "class": src.models.flux.FluxModel,
-                "type": "image",
-            },
-            "hunyuan-video": {
-                "class": src.models.hunyuan.HunyuanVideoModel,
-                "type": "video",
-            },
-            "stable-diffusion-xl": {
-                "class": src.models.stablediffusionxl.StableDiffusionXLModel,
-                "type": "image",
-            },
-        }
-
-    def get_model(self, model_name):
-        """Get the model class and type based on the model name."""
-        if model_name not in self.model_mapping:
-            raise NotImplementedError(f"`{model_name}` is not supported")
-
-        model_info = self.model_mapping[model_name]
-        return model_info["class"], model_info["type"]
-
-    def get_available_models(self):
-        """Get the list of available model names."""
-        return list(self.model_mapping.keys())
 
 
 class Trainer:
@@ -97,7 +71,7 @@ class Trainer:
         # Arguments
         self.args = args
         self.is_cached = False
-        self.model_type = None
+        self.model_output_type = None
 
         # Multi-gpu with accelerate
         self.accelerator = Accelerator(
@@ -138,20 +112,10 @@ class Trainer:
         6. Creates the image transformation pipeline
         """
         # Initialize model and set type
-        model_class, self.model_type = ModelManager().get_model(self.args.model)
-        self.model = model_class(self.args)
-
-        # From https://github.com/huggingface/diffusers/blob/edb8c1bce67e81f0de90a7e4c16b2f6537d39f2d/src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py#L114
-        self.sigmas = (
-            self.model.submodules["scheduler"].timesteps
-            / self.model.submodules["scheduler"].config.num_train_timesteps
-        ).to(self.accelerator.device)
-        self.sigmas = (
-            self.args.shift * self.sigmas / (1 + (self.args.shift - 1) * self.sigmas)
+        model_class, self.model_input_type, self.model_output_type = (
+            ModelManager().get_model(self.args.model)
         )
-        self.model.submodules["scheduler"].timesteps = (
-            self.sigmas * self.model.submodules["scheduler"].config.num_train_timesteps
-        )
+        self.model: BaseModel = model_class(self.args)
 
         # For mixed precision training
         self.weight_dtype = torch.float32
@@ -160,9 +124,6 @@ class Trainer:
         elif self.accelerator.mixed_precision == "bf16":
             self.weight_dtype = torch.bfloat16
 
-        # Gradient checkpointing to save memory at the cost of computatational complexity
-        if self.args.use_gradient_checkpointing:
-            self.model.denoiser.enable_gradient_checkpointing()
         # Modules to apply the lora matrix to
         if self.args.use_lora:
             self.model.init_lora()
@@ -210,6 +171,8 @@ class Trainer:
             iter (int, optional): The current iteration number, used in the output filename.
                 Defaults to 0.
         """
+        Path(self.args.output_dir, "validation").mkdir(parents=True, exist_ok=True)
+
         # Load all necessary components into VRAM
         self.model.submodules_to(self.accelerator.device, self.weight_dtype)
 
@@ -231,7 +194,7 @@ class Trainer:
         width, height = self.args.resolution
         # Known issue where latents are cast to torch.float32 before being fed into the VAE.
         # This forces the latents to be cast to float16/bfloat16 to avoid precision issues.
-        if self.model_type == "image":
+        if self.model_output_type == "image":
 
             def convertfp16(flux_pipeline, i, t, callback_kwargs):
                 latents = callback_kwargs["latents"].to(self.weight_dtype)
@@ -273,13 +236,13 @@ class Trainer:
         if self.args.use_cache:
             self.model.unload_submodules()
         if self.accelerator.is_local_main_process:
-            Path("./outputs").mkdir(exist_ok=True)
-            if self.model_type == "image":
+            if self.model_output_type == "image":
                 image.save(
                     str(
                         Path(
                             self.args.output_dir,
-                            f"validation_images/val_image_iter{iter}.png",
+                            "validation",
+                            f"val_image_iter{iter}.png",
                         )
                     )
                 )
@@ -289,7 +252,8 @@ class Trainer:
                     str(
                         Path(
                             self.args.output_dir,
-                            f"validation_images/val_video_iter{iter}.mp4",
+                            "validation",
+                            f"val_video_iter{iter}.mp4",
                         )
                     ),
                     fps=15,
@@ -308,23 +272,15 @@ class Trainer:
 
         # Check whether all necessary files for the latents and text encodings have been cached.
         # Otherwise they need to be computed.
-        if (
-            Path(self.args.cache_dir, "latents.npy").exists()
-            and Path(self.args.cache_dir, "prompt_embeds.npy").exists()
-            and Path(self.args.cache_dir, "pooled_prompt_embeds.npy").exists()
-            and Path(self.args.cache_dir, "input_mask.npy").exists()
-            and Path(self.args.cache_dir, "input_mask_2.npy").exists()
-            and self.args.use_cache
-        ):
+        cache_file = Path(self.args.cache_dir, "cached_data.zarr")
+        if cache_file.exists() and self.args.use_cache:
             self.is_cached = True
 
         # Load cached dataset
         if self.is_cached:
-            selected_collate_fn = cache_collate_fn
-            train_dataset = CacheDataset(self.args.cache_dir, self.weight_dtype)
+            train_dataset = CacheDataset(str(cache_file), self.weight_dtype)
 
         else:
-            selected_collate_fn = collate_fn
             # Load the dataset
             dataset = datasets.load_dataset(
                 self.args.train_data_path,
@@ -351,10 +307,11 @@ class Trainer:
                 train_dataset = dataset.with_transform(
                     lambda examples: preprocess_train(
                         examples,
-                        self.model.submodules["tokenizer"],
-                        self.model.submodules["tokenizer_2"],
-                        self.transform_pipeline,
-                        self.args.num_frames,
+                        self.args,
+                        tokenizer=self.model.submodules["tokenizer"],
+                        tokenizer_2=self.model.submodules["tokenizer_2"],
+                        image_processor=self.model.submodules["image_processor"],
+                        train_transforms=self.transform_pipeline,
                     ),
                 )
 
@@ -362,9 +319,11 @@ class Trainer:
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
             shuffle=True,
-            collate_fn=selected_collate_fn,
+            collate_fn=collate_fn,
             batch_size=self.args.train_batch_size,
             num_workers=self.args.dataloader_num_workers,
+            pin_memory=True,
+            persistent_workers=self.args.dataloader_num_workers > 0,
         )
         return train_dataloader
 
@@ -384,75 +343,24 @@ class Trainer:
             disable=not self.accelerator.is_local_main_process,
             leave=False,
         )
-        latents_list = []
-        pooled_prompt_list = []
-        prompt_list = []
-        input_mask_list = []
-        input_mask_2_list = []
 
-        # Calculate the latents for all images
+        # Cache all training data
+        if self.accelerator.is_main_process:
+            gathered_data = []
+
         for _, batch in enumerate(dataloader):
             with torch.inference_mode():
-                # Generate latents
-                latents = self.model.encode_image(batch)
+                encoded_batch = self.model.encode_batch(batch)
 
-                # Generate text encodings
-                pooled_prompt_embeds, prompt_embeds = self.model.encode_text(batch)
+            gathered_batch = self.accelerator.gather(encoded_batch)
+            if self.accelerator.is_main_process:
+                for key, value in gathered_batch.items():
+                    gathered_batch[key] = value.to("cpu")
 
-                input_mask, input_mask_2 = batch["input_mask"], batch["input_mask_2"]
+                cache_file = str(Path(self.args.cache_dir, "cached_data.zarr"))
+                create_or_append_to_xr_dataset(gathered_batch, cache_file=cache_file)
 
-                gathered_latents = self.accelerator.gather(latents)
-                gathered_pooled_embeds = self.accelerator.gather(pooled_prompt_embeds)
-                gathered_embeds = self.accelerator.gather(prompt_embeds)
-                if input_mask is not None:
-                    gathered_input_mask = self.accelerator.gather(input_mask)
-                if input_mask_2 is not None:
-                    gathered_input_mask_2 = self.accelerator.gather(input_mask_2)
-
-                if self.accelerator.is_local_main_process:
-                    latents_list.append(gathered_latents.to("cpu"))
-                    pooled_prompt_list.append(gathered_pooled_embeds.to("cpu"))
-                    prompt_list.append(gathered_embeds.to("cpu"))
-                    if input_mask is not None:
-                        input_mask_list.append(gathered_input_mask.to("cpu"))
-                    if input_mask_2 is not None:
-                        input_mask_2_list.append(gathered_input_mask_2.to("cpu"))
-
-                if self.accelerator.is_local_main_process:
-                    progress_bar.update(1)
-
-        if self.accelerator.is_local_main_process:
-            latents_list = torch.cat(latents_list)
-            pooled_prompt_list = torch.cat(pooled_prompt_list)
-            prompt_list = torch.cat(prompt_list)
-            if len(input_mask_list) > 0:
-                input_mask_list = torch.cat(input_mask_list)
-            if len(input_mask_2_list) > 0:
-                input_mask_2_list = torch.cat(input_mask_2_list)
-
-        if self.accelerator.is_local_main_process:
-            np.save(
-                str(Path(self.args.cache_dir, "latents.npy")),
-                latents_list.numpy(),
-            )
-            np.save(
-                str(Path(self.args.cache_dir, "pooled_prompt_embeds.npy")),
-                pooled_prompt_list.numpy(),
-            )
-            np.save(
-                str(Path(self.args.cache_dir, "prompt_embeds.npy")),
-                prompt_list.numpy(),
-            )
-            if len(input_mask_list) > 0:
-                np.save(
-                    str(Path(self.args.cache_dir, "input_mask.npy")),
-                    input_mask_list.numpy(),
-                )
-            if len(input_mask_2_list) > 0:
-                np.save(
-                    str(Path(self.args.cache_dir, "input_mask_2.npy")),
-                    input_mask_2_list.numpy(),
-                )
+                progress_bar.update(1)
 
         self.accelerator.wait_for_everyone()
         self.is_cached = True
@@ -491,6 +399,52 @@ class Trainer:
                 self.model.denoiser, optimizer, train_dataloader, lr_scheduler
             )
         )
+        # Apply the (partial) gradient checkpointing
+        # We follow https://github.com/huggingface/accelerate/blob/33967d4733ec5bf402d85462ec2bbbcd8e872ea9/src/accelerate/accelerator.py#L1658-L1665
+        # which matches with `fsdp_config: fsdp_activation_checkpointing=True`
+        # NB! We don't use Diffuser's `enable_gradient_checkpointing()` because this results in performance regressions
+        if self.args.gradient_checkpointing > 0:
+            if self.accelerator.distributed_type != accelerate.DistributedType.FSDP:
+                raise NotImplementedError(
+                    "Activation/Gradient checkpointing is only available for FSDP"
+                )
+
+            if self.accelerator.state.fsdp_plugin.activation_checkpointing:
+                logger.warning(
+                    "Setting activation checkpointing via both `fsdp_config: fsdp_activation_checkpointing=True` \
+                        and `train_args.gradient_checkpointing` can lead into unwanted behaviour: use either or, not both!"
+                )
+
+            def _check_fn(module):
+                """
+                Helper function to activate the activation/gradient checkpointing on the non-FSDP modules
+                that are tagged with `use_in_partial_checkpointing=True`
+                NB!
+                * We use (base) model to annotate the modules with attribute `use_in_partial_checkpointing=True`
+                * TRANSFORMER_BASED_WRAP iterates the modules as both "normal" module and "FSDP module".
+                    We don't apply grad.ckpt on "FSDP modules", because this can lead into performance regressions
+                """
+                return getattr(
+                    module, "use_in_partial_checkpointing", False
+                ) and not module.__class__.__name__.startswith(
+                    "FullyShardedDataParallel"
+                )
+
+            kwargs = dict(
+                checkpoint_wrapper_fn=functools.partial(
+                    checkpoint_wrapper,
+                    checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                ),
+                check_fn=_check_fn,
+            )
+            if self.args.gradient_checkpointing == 1.0:
+                # NB! We use `auto_wrap_policy` in case of full (100%) checkpointing
+                # This will automatically overwrite `check_fn` and apply gradient checkpointing on all modules
+                kwargs["auto_wrap_policy"] = (
+                    self.accelerator.state.fsdp_plugin.auto_wrap_policy
+                )
+
+            apply_activation_checkpointing(self.model.denoiser, **kwargs)
 
         # Move to correct gpu/dtype, offload vae to cpu if latents are cached
         if not self.args.use_cache:
@@ -519,10 +473,14 @@ class Trainer:
         Context manager for profiling the training step.
         """
         if self.args.profiling_step == step:
+            Path(
+                self.args.profiling_logging_dir,
+            ).mkdir(parents=True, exist_ok=True)
             profile_kwargs = ProfileKwargs(
                 activities=["cpu", "cuda"],
+                # schedule=torch.profiler.schedule(wait=1, warmup=1, active=2),
                 record_shapes=True,
-                with_stack=False,
+                with_stack=True,
                 profile_memory=True,
                 on_trace_ready=lambda prof: prof.export_chrome_trace(
                     str(
@@ -623,17 +581,6 @@ class Trainer:
                 optimizer, train_dataloader, lr_scheduler
             )
 
-        progress_bar = tqdm(
-            range(
-                0,
-                int(self.args.num_iterations),
-            ),
-            desc="Steps",
-            # Only show the progress bar once on each machine.
-            disable=not self.args.show_progress_bar
-            or not self.accelerator.is_local_main_process,
-        )
-
         # Calculate the flops for the training loop
         flop_counter = FlopCounterMode(display=False, depth=None)
         total_flops = 0.0
@@ -649,7 +596,15 @@ class Trainer:
         global_step = 0
         train_loss = 0.0
 
+        # Initialize CUDA events
+        start_event_gpu = torch.cuda.Event(enable_timing=True)
+        end_event_gpu = torch.cuda.Event(enable_timing=True)
+
+        # Training loop
         while global_step < self.args.num_iterations:
+            # Record start time including data loading
+            start_time_step = time.time()
+
             for step, batch in enumerate(train_dataloader):
                 # Generate validation image
                 if (
@@ -671,40 +626,22 @@ class Trainer:
                 with self.accelerator.accumulate(
                     self.model.denoiser
                 ), self._profiling_ctx(global_step), flop_counter:
-                    start_time = time.time()
+                    start_event_gpu.record()
 
-                    if self.is_cached:
-                        latents = batch["latents"]
-                        pooled_prompt_embeds = batch["pooled_prompt_embeds"]
-                        prompt_embeds = batch["prompt_embeds"]
-                    else:
-                        # Encode the images
-                        latents = self.model.encode_image(batch)
-                        batch["latents"] = latents
+                    # If un-cached, encode the batch
+                    if not self.is_cached:
+                        batch = self.model.encode_batch(batch)
 
-                        # Encode the prompts
-                        pooled_prompt_embeds, prompt_embeds = self.model.encode_text(
-                            batch
-                        )
-
-                        batch["pooled_prompt_embeds"] = pooled_prompt_embeds
-                        batch["prompt_embeds"] = prompt_embeds
-
-                    # Sample timesteps and create noise - density timestep sampling as used in sd3
                     noised_latents, noise, timesteps = (
-                        self.model.sample_timesteps_and_noise(
-                            latents,
-                            self.sigmas,
-                            logit_mean=0.0,
-                            logit_std=1.0,
-                        )
+                        self.model.sample_timesteps_and_noise(batch["latents"])
                     )
-
                     batch["noised_latents"] = noised_latents
+                    batch["timestep"] = timesteps
 
-                    conditionals, timesteps = self.model.additional_conditionals(
-                        batch, timesteps
-                    )
+                    # Get the model specific inputs:
+                    # Each model must implement `get_model_inputs` which posprocesses
+                    # the batch into final model inputs fed to `model.denoiser`
+                    model_inputs, timesteps = self.model.get_model_inputs(batch)
 
                     # Guidance conditioning
                     if self.model.guidance is not None:
@@ -713,18 +650,19 @@ class Trainer:
                             self.model.guidance,
                             dtype=self.weight_dtype,
                             device=self.accelerator.device,
-                        ).expand(latents.shape[0])
-                        conditionals["guidance"] = guidance
+                        ).expand(batch["latents"].shape[0])
+                        model_inputs["guidance"] = guidance
 
                     # Inference
                     pred = self.model.denoiser(
                         timestep=timesteps,
-                        encoder_hidden_states=prompt_embeds,
+                        **model_inputs,
                         return_dict=False,
-                        **conditionals,
                     )[0]
 
-                    loss = self.model.compute_loss(pred, noise, latents, timesteps)
+                    loss = self.model.compute_loss(
+                        pred, noise, batch["latents"], timesteps
+                    )
                     self.accelerator.backward(loss)
 
                     # Clip gradients
@@ -745,8 +683,15 @@ class Trainer:
                 # Wait for all processes to finish before recording the time
                 if self.accelerator.use_distributed:
                     self.accelerator.wait_for_everyone()
-                step_time = time.time() - start_time
-                fps_gpu = self.args.train_batch_size / step_time
+
+                end_event_gpu.record()
+                torch.cuda.synchronize()
+
+                # Calculate GPU timing
+                step_time_gpu = (
+                    start_event_gpu.elapsed_time(end_event_gpu) / 1000
+                )  # GPU step time in seconds. NB! event.elapsed_time is in ms
+                fps_gpu = self.args.train_batch_size / step_time_gpu
 
                 # Calculate loss across all processes
                 # This is only for logging purposes; loss.backward() has already been done above
@@ -761,29 +706,34 @@ class Trainer:
                 if isinstance(flop_counter, FlopCounterMode):
                     total_flops = flop_counter.get_total_flops()
                     flop_counter = contextlib.nullcontext()
-                logs = {
-                    "step_loss": loss.detach().item(),
-                    "lr": lr_scheduler.get_last_lr()[0],
-                    "step_time": step_time,
-                    "fps_gpu": fps_gpu,
-                    "tflops/s": total_flops * 1e-12 / step_time,
-                }
+
+                # Calculate entire step timing (in seconds)
+                step_time_total = time.time() - start_time_step
 
                 # Logging
+                logs = {
+                    "step_time_total": step_time_total,
+                    "step_loss": loss.detach().item(),
+                    "lr": lr_scheduler.get_last_lr()[0],
+                    "step_time_gpu": step_time_gpu,
+                    "fps_gpu": fps_gpu,
+                    "tflops/s": total_flops * 1e-12 / step_time_gpu,
+                }
                 if self.accelerator.sync_gradients:
-                    progress_bar.update(1)
                     global_step += 1
                     logs["train_loss"] = train_loss
                     train_loss = 0.0
 
-                progress_bar.set_postfix(**logs)
+                postpr_logs = {k: float(f"{v:.4E}") for k, v in logs.items()}
                 if self.accelerator.is_local_main_process:
-                    logger.info(f"Step {global_step}: {logs}")
+                    logger.info(f"Step {global_step}: {postpr_logs}")
                     self.accelerator.log(logs, step=global_step)
 
                 # Break if the max number of iterations are exceeded
                 if global_step >= self.args.num_iterations:
                     break
+
+                start_time_step = time.time()
 
             # Generate last validation image
             if global_step >= self.args.num_iterations:
@@ -793,12 +743,14 @@ class Trainer:
                 ):
                     with torch.no_grad():
                         self.generate(iter=global_step)
+
+        # Save the trained model's checkpoint
+        Path(self.args.output_dir, "checkpoint").mkdir(parents=True, exist_ok=True)
         with (
             self.model.denoiser.summon_full_params(self.model.denoiser, writeback=False)
             if self.accelerator.distributed_type == accelerate.DistributedType.FSDP
             else contextlib.nullcontext()
         ):
-            # Disabled for now- no need only takes up time during the sweep
             if self.accelerator.is_local_main_process:
                 self.accelerator.unwrap_model(self.model.denoiser).save_pretrained(
                     str(Path(self.args.output_dir, "checkpoint"))

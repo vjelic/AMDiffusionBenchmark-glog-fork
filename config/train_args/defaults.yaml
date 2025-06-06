@@ -4,3 +4,5 @@
 # can be provided with `+train_args.<parameter>=<value>`.
 train_batch_size: 1
 num_iterations: 100
+logging_dir: outputs/runs
+profiling_logging_dir: ${.logging_dir}/profile

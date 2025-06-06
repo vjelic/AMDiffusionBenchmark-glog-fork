@@ -1,33 +1,33 @@
 import argparse
 import copy
+import types
 from typing import Dict, Tuple
 
 import torch
 
 from src.models.base import BaseModel
-from src.models.models_utils import compute_density_based_timestep_sampling
+from src.models.models_utils import (
+    compute_density_based_timestep_sampling,
+    get_attention_processors,
+    set_attention_processors,
+)
 
 
-class HunyuanVideoModel(BaseModel):
-    """An implementation of the Hunyuan flow-based diffusion model for video generation.
+class MochiModel(BaseModel):
+    """An implementation of the Mochi-1 diffusion model for video generation.
 
-    This model extends BaseModel and incorporates HunyuanVideo-specific settings.
+    This model extends BaseModel and incorporates Mochi-1 (preview) specific settings.
     It includes methods for tokenizing text prompts according to a custom
     prompt template, as well as for encoding video frames and text prompts
     into latent representations.
 
     Attributes:
-        hf_id (str): The Hugging Face model identifier (default: "hunyuanvideo-community/HunyuanVideo").
+        hf_id (str): The Hugging Face model identifier (default: "genmo/mochi-1-preview").
         loss_type (str): The loss function type ("flow_match" for this implementation).
-        guidance (float): Guidance value for conditional generation, set to a high default (1000.0).
-        prompt_template (dict): Template for prompt formatting, including a truncation (`crop_start`) parameter.
     """
 
-    def __init__(
-        self,
-        args: argparse.Namespace,
-    ) -> None:
-        """Initializes the HunyuanVideoModel with appropriate submodule configurations.
+    def __init__(self, args: argparse.Namespace) -> None:
+        """Initializes the Mochi-1 with appropriate submodule configurations.
 
         The constructor sets up the diffusion pipeline for video generation
         and defines a custom prompt template to process incoming text prompts.
@@ -36,48 +36,60 @@ class HunyuanVideoModel(BaseModel):
             args (argparse.Namespace): The argument namespace containing model,
                 training, and configuration parameters.
         """
-        # Initial implementation of Hunyuan-video model
-        self.hf_id = "hunyuanvideo-community/HunyuanVideo"
-        self.guidance = 1000.0
-        super(HunyuanVideoModel, self).__init__(args)
+        # Initial implementation of Mochi-1 model
+        self.hf_id = "genmo/mochi-1-preview"
+
+        super(MochiModel, self).__init__(args)
 
         self.denoiser_config = copy.deepcopy(self.denoiser.config)
-
-        self.prompt_template = {
-            "template": (
-                "<|start_header_id|>system<|end_header_id|>\n\nDescribe the video by detailing the following aspects: "
-                "1. The main content and theme of the video."
-                "2. The color, shape, size, texture, quantity, text, and spatial relationships of the objects."
-                "3. Actions, events, behaviors temporal relationships, physical movement changes of the objects."
-                "4. background environment, light, style and atmosphere."
-                "5. camera angles, movements, and transitions used in the video:<|eot_id|>"
-                "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|>"
-            ),
-            "crop_start": 95,
-        }
-
         original_tokenizer = self.submodules["tokenizer"]
-        original_tokenizer_2 = self.submodules["tokenizer_2"]
 
         # Create a tokenizer that only takes prompt as argument
         self.submodules["tokenizer"] = lambda prompt: original_tokenizer(
-            [self.prompt_template["template"].format(p) for p in prompt],
-            max_length=256 + self.prompt_template["crop_start"],
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-            return_length=False,
-            return_overflowing_tokens=False,
-            return_attention_mask=True,
-        )
-
-        self.submodules["tokenizer_2"] = lambda prompt: original_tokenizer_2(
             prompt,
             padding="max_length",
-            max_length=77,
+            max_length=256,
             truncation=True,
+            add_special_tokens=True,
             return_tensors="pt",
         )
+        self.latents_mean = torch.tensor(
+            self.submodules["vae"].config.latents_mean
+        ).view(1, 12, 1, 1, 1)
+        self.latents_std = torch.tensor(self.submodules["vae"].config.latents_std).view(
+            1, 12, 1, 1, 1
+        )
+
+    def init_attention(self):
+        # Implement the attn_processors method if missing
+        if not self.denoiser:
+            raise RuntimeError("self.denoiser is not initialized.")
+
+        # Check and setup attn_processors property
+        if not hasattr(self.denoiser.__class__, "attn_processors"):
+
+            def attn_processors(instance):
+                # This allows the property to access the correct instance's method
+                return get_attention_processors(instance)
+
+            # Assign it as a property to the class
+            setattr(
+                self.denoiser.__class__, "attn_processors", property(attn_processors)
+            )
+
+        # Implement the set_attn_processor method if missing
+        if not hasattr(self.denoiser, "set_attn_processor"):
+
+            def set_attn_processor(self, processor_dict):
+                # Use the helper to set all attention processors
+                set_attention_processors(processor_dict, self)
+
+            # Assign the method to the instance
+            self.denoiser.set_attn_processor = types.MethodType(
+                set_attn_processor, self.denoiser
+            )
+
+        return super().init_attention()
 
     def encode_image(self, batch: dict) -> torch.Tensor:
         """Encodes video frames into latent representations.
@@ -101,8 +113,7 @@ class HunyuanVideoModel(BaseModel):
             .encode(video.to(self.submodules["vae"].dtype))
             .latent_dist.sample()
         )
-        latents = (latents) * self.submodules["vae"].config.scaling_factor
-        return latents
+        return latents * self.submodules["vae"].config.scaling_factor
 
     def encode_text(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Encodes text prompts into latent embeddings using two encoders.
@@ -114,7 +125,6 @@ class HunyuanVideoModel(BaseModel):
             batch (dict): A dictionary containing:
                 - "input_ids" (torch.Tensor): Input IDs for the first encoder.
                 - "input_mask" (torch.Tensor): Attention mask for the first encoder.
-                - "input_ids_2" (torch.Tensor): Input IDs for the second encoder.
 
         Returns:
             tuple:
@@ -122,54 +132,43 @@ class HunyuanVideoModel(BaseModel):
                 - torch.Tensor: Hidden-state embeddings from the second-to-last layer
                 of the first text encoder (llama-like), optionally cropped based on self.prompt_template["crop_start"].
         """
-        # Create llama embeds
+        # Create T5 embeds
         prompt_embeds = self.submodules["text_encoder"](
-            input_ids=batch["input_ids"].to(self.submodules["text_encoder"].device),
-            attention_mask=batch["input_mask"],
-            output_hidden_states=True,
-        ).hidden_states[-3]
+            batch["input_ids"], attention_mask=batch["input_mask"]
+        )[0]
         prompt_embeds = prompt_embeds.to(dtype=self.submodules["text_encoder"].dtype)
 
-        crop_start = self.prompt_template["crop_start"]
-        if crop_start is not None and crop_start > 0:
-            prompt_embeds = prompt_embeds[:, crop_start:]
+        return None, prompt_embeds
 
-        # Create CLIP embeds
-        pooled_prompt_embeds = self.submodules["text_encoder_2"](
-            batch["input_ids_2"].to(self.submodules["text_encoder_2"].device),
-            output_hidden_states=False,
-        ).pooler_output
-        pooled_prompt_embeds = pooled_prompt_embeds.to(
-            dtype=self.submodules["text_encoder_2"].dtype
-        )
-        return pooled_prompt_embeds, prompt_embeds
+    def encode_batch(self, batch: Dict[str, torch.Tensor]):
+        batch = super().encode_batch(batch)
+        batch.pop(
+            "pooled_prompt_embeds"
+        )  # this is None, because tokenizer2 doesn't exist
+        return batch
 
     def get_model_inputs(
         self,
         batch: Dict[str, torch.tensor],
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
-        """Creates any additional conditionals required for the HunyuanVideoTransformer3DModel.forward:
-        https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_hunyuan_video.py#L1025
+        """Creates any additional conditionals required for the MochiTransformer3DModel.forward:
+        https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_mochi.py#L407
+
         Args:
-            batch (dict): Contains "input_mask" which may be cropped based on the
-                prompt_template["crop_start"] value.
+            batch (dict): Batch's data.
 
         Returns:
-            - dict: A dictionary containing: "hidden_states", "encoder_hidden_states", "pooled_projections", and "encoder_attention_mask"
-            - torch.Tensor: Modified timesteps, multiplied by 1000.0 and cast to long.
+            - dict: A dictionary containing: "hidden_states", "encoder_hidden_states", and "encoder_attention_mask"
+            - torch.Tensor: Timesteps
         """
         output = {}
         output["hidden_states"] = batch["noised_latents"]
         output["encoder_hidden_states"] = batch["prompt_embeds"]
-        output["pooled_projections"] = batch["pooled_prompt_embeds"]
         # Get the additional prompt attention mask conditional
         prompt_attention_mask = batch["input_mask"].to(device=self.denoiser.device)
-        crop_start = self.prompt_template["crop_start"]
-        if crop_start is not None and crop_start > 0:
-            prompt_attention_mask = prompt_attention_mask[:, crop_start:]
 
         output["encoder_attention_mask"] = prompt_attention_mask
-        return output, (batch["timestep"] * 1000.0).long()
+        return output, 1000 * (1 - batch["timestep"])
 
     def compute_loss(self, pred, noise, latents=None, timesteps=None):
         """Compute the loss for the model.
@@ -183,9 +182,14 @@ class HunyuanVideoModel(BaseModel):
             torch.Tensor: The computed loss.
 
         """
+        denoised_latents = (latents - noise).float()
         return torch.nn.functional.mse_loss(
             pred.float(),
-            (noise - latents).float(),
+            (
+                denoised_latents
+                - self.latents_mean.to(denoised_latents.device, denoised_latents.dtype)
+            )
+            / self.latents_std.to(denoised_latents.device, denoised_latents.dtype),
             reduction="mean",
         )
 

@@ -64,13 +64,15 @@ def parse_log_file(
     """
     step_losses = []
     step_times = []
+    step_times_gpu = []
     fps_values = []
     flops_values = []
     status = STATUS_SUCCESS
 
     # Regular expression patterns to extract metrics
     loss_pattern = re.compile(r"step_loss': ([0-9\.e+-]+)")
-    time_pattern = re.compile(r"step_time': ([0-9\.e+-]+)")
+    time_pattern = re.compile(r"step_time_total': ([0-9\.e+-]+)")
+    time_pattern_gpu = re.compile(r"step_time_gpu': ([0-9\.e+-]+)")
     fps_pattern = re.compile(r"fps_gpu': ([0-9\.e+-]+)")
     flops_pattern = re.compile(r"tflops/s': ([0-9\.e+-]+)")
     oom_pattern = re.compile(
@@ -97,6 +99,10 @@ def parse_log_file(
                     if time_match:
                         step_times.append(float(time_match.group(1)))
 
+                    time_match_gpu = time_pattern_gpu.search(line)
+                    if time_match_gpu:
+                        step_times_gpu.append(float(time_match_gpu.group(1)))
+
                     fps_match = fps_pattern.search(line)
                     if fps_match:
                         fps_values.append(float(fps_match.group(1)))
@@ -105,9 +111,14 @@ def parse_log_file(
                     if fps_match:
                         flops_values.append(float(flops_match.group(1)))
 
+        # Calculate the total elapsed time as a sum of step times
+        # NB! This value contains also the warmup steps
+        total_time = sum(step_times) if step_times else None
+
         # Exclude warmup steps
         step_losses = step_losses[warmup_steps:]
         step_times = step_times[warmup_steps:]
+        step_times_gpu = step_times_gpu[warmup_steps:]
         fps_values = fps_values[warmup_steps:]
         flops_values = flops_values[warmup_steps:]
 
@@ -117,21 +128,27 @@ def parse_log_file(
         # Calculate statistics
         metrics = {
             **DEFAULT_METRICS,
+            "total_elapsed_time": total_time,
             "avg_loss": np.mean(step_losses) if step_losses else None,
             "std_loss": np.std(step_losses) if step_losses else None,
             "avg_loss_tail": np.mean(tail_losses) if tail_losses else None,
             "std_loss_tail": np.std(tail_losses) if tail_losses else None,
-            "avg_time": np.mean(step_times) if step_times else None,
-            "std_time": np.std(step_times) if step_times else None,
-            "avg_fps": np.mean(fps_values) if fps_values else None,
-            "std_fps": np.std(fps_values) if fps_values else None,
+            "avg_step_time_total": np.mean(step_times) if step_times else None,
+            "std_step_time_total": np.std(step_times) if step_times else None,
+            "avg_step_time_gpu": np.mean(step_times_gpu) if step_times_gpu else None,
+            "std_step_time_gpu": np.std(step_times_gpu) if step_times_gpu else None,
+            "avg_fps_gpu": np.mean(fps_values) if fps_values else None,
+            "std_fps_gpu": np.std(fps_values) if fps_values else None,
             "avg_tflops": np.mean(flops_values) if flops_values else None,
             "std_tflops": np.std(flops_values) if flops_values else None,
             "num_samples": len(step_losses),
             STATUS: status,
         }
-
-        return metrics
+        postpr_metrics = {
+            k: float(f"{v:.4E}") if isinstance(v, float) else v
+            for k, v in metrics.items()
+        }
+        return postpr_metrics
 
     except Exception as e:
         logging.error(f"Error parsing log file {log_filename}: {str(e)}")
@@ -186,20 +203,28 @@ def generate_dataframe(
         Optional[pd.DataFrame]: A DataFrame containing run information and metrics.
     """
     existing_df = load_existing_dataframe(output_dir) if update_df else None
-    run_ids = get_run_ids(output_dir)
+    run_info = get_run_ids(output_dir)
 
-    if not run_ids:
+    if not run_info:
         logging.info("No configuration files found. No DataFrame created.")
         return existing_df if existing_df is not None else pd.DataFrame()
 
+    run_ids = [info[0] for info in run_info]
     to_update_run_ids = get_runs_to_update(existing_df, run_ids)
 
     if not to_update_run_ids:
         return existing_df
 
+    # Filter run_info to only include runs that need updating
+    to_update_run_info = [
+        (run_id, run_name)
+        for run_id, run_name in run_info
+        if run_id in to_update_run_ids
+    ]
+
     data_list = [
-        process_run(run_id, output_dir, warmup_steps, git_info)
-        for run_id in to_update_run_ids
+        process_run(run_id, run_name, output_dir, warmup_steps, git_info)
+        for run_id, run_name in to_update_run_info
     ]
 
     new_df = pd.DataFrame(data_list)
@@ -224,11 +249,18 @@ def get_run_ids(output_dir: str) -> List[int]:
     """Helper function to get run IDs from configuration files."""
     try:
         config_files = [
-            f for f in os.listdir(output_dir) if re.match(r"\d+_config\.yaml", f)
+            f for f in os.listdir(output_dir) if re.match(r"\d+_config_.*\.yaml", f)
         ]
-        return sorted(
-            int(re.match(r"(\d+)_config\.yaml", f).group(1)) for f in config_files
-        )
+        result = []
+        for f in config_files:
+            match = re.match(r"(\d+)_config_(.*)\.yaml", f)
+            if match:
+                run_id = int(match.group(1))
+                run_name = match.group(2)
+                result.append((run_id, run_name))
+
+        return sorted(result, key=lambda x: x[0])  # Sort by run_id
+
     except Exception as e:
         logging.error(f"Error listing files in directory {output_dir}: {e}")
         return []
@@ -250,6 +282,7 @@ def get_runs_to_update(
 
 def process_run(
     run_id: int,
+    run_name: str,
     output_dir: str,
     warmup_steps: int,
     git_info: Dict[str, Any],
@@ -268,19 +301,20 @@ def process_run(
     Returns:
         Dict[str, Any]: Dictionary containing:
             - run_id: The provided run ID
+            - run_name: The provided run name
             - timestamp: Timestamp when the log file was last modified (None if not run)
             - accelerate configuration parameters
             - CLI arguments used for the run
             - parsed metrics from log file (or default metrics if not run)
             - git repository information
     """
-    config_filename = os.path.join(output_dir, f"{run_id}_config.yaml")
+    config_filename = os.path.join(output_dir, f"{run_id}_config_{run_name}.yaml")
     with open(config_filename, "r") as f:
         config = yaml.safe_load(f)
     accelerate_config_params = config.get(ACCELERATE_CONFIG, {})
     train_args_params = config.get(CLI_ARGS, {})
 
-    log_filename = os.path.join(output_dir, f"{run_id}_logs.txt")
+    log_filename = os.path.join(output_dir, f"{run_id}_logs_{run_name}.txt")
     if os.path.exists(log_filename):
         metrics = parse_log_file(log_filename, warmup_steps)
         log_mtime = os.path.getmtime(log_filename)
@@ -291,6 +325,7 @@ def process_run(
 
     return {
         RUN_ID: run_id,
+        "run_name": run_name,
         "timestamp": timestamp,
         **accelerate_config_params,
         **train_args_params,

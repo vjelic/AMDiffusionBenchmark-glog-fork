@@ -1,8 +1,11 @@
 import argparse
 import os
+from pathlib import Path
 
 import torch
 from diffusers import FluxPipeline, FluxTransformer2DModel
+
+from utils import parse_resolution
 
 
 def parse_args():
@@ -40,31 +43,37 @@ def parse_args():
     )
     parser.add_argument(
         "--resolution",
-        type=int,
-        default=int(os.getenv("RESOLUTION", 512)),
-        required=False,
-        help="The resolution at which to generate the image.",
+        type=parse_resolution,
+        default=parse_resolution(os.getenv("RESOLUTION", "512")),
+        help="The resolution (width, height) of the outputs",
     )
     parser.add_argument(
         "--num_steps",
         type=int,
         default=int(os.getenv("NUM_STEPS", 28)),
         required=False,
-        help="The number of steps to use when generating the image.",
+        help="The number of steps to use when generating the output.",
     )
     parser.add_argument(
         "--guidance_scale",
         type=float,
         default=float(os.getenv("GUIDANCE_SCALE", 3.5)),
         required=False,
-        help="The guidance scale to use when generating the image.",
+        help="The guidance scale to use when generating the output.",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=int(os.getenv("SEED", 42)),
         required=False,
-        help="The seed to use when generating images.",
+        help="The seed to use when generating outputs.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs/inference_images",
+        required=False,
+        help="Output path for generated outputs.",
     )
 
     args = parser.parse_args()
@@ -99,18 +108,19 @@ def main():
 
     # Generate an image for each prompt
     for prompt in prompts:
-
+        width, height = args.resolution
         image = pipeline(
             prompt,
             guidance_scale=args.guidance_scale,
             num_inference_steps=args.num_steps,
             max_sequence_length=256,
-            height=args.resolution,
-            width=args.resolution,
+            height=height,
+            width=width,
             generator=generator,
         ).images[0]
 
-        image.save(f"outputs/inference_images/{prompt}.png")
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        image.save(str(Path(args.output_dir, f"{prompt}.png")))
 
 
 if __name__ == "__main__":

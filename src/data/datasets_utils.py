@@ -1,5 +1,6 @@
+import argparse
 import os
-from typing import Any, Iterable
+from typing import Dict, Iterable, List, Optional, Union
 
 import numpy as np
 import torch
@@ -14,8 +15,7 @@ def tokenize_captions(
     """Tokenize captions extracted from image filenames using two tokenizers.
 
     Args:
-        examples (dict): A dictionary containing image data under the key "image".
-            Each item in examples["image"] should have a 'filename' attribute.
+        examples (dict): A dictionary containing the input data.
         tokenizer (Tokenizer): The first tokenizer to process the captions.
         tokenizer_2 (Tokenizer): The second tokenizer to process the captions.
 
@@ -36,136 +36,210 @@ def tokenize_captions(
 
     inputs = tokenizer(captions)
     input_ids = inputs.input_ids
+    if isinstance(input_ids, list):
+        input_ids = torch.tensor(input_ids)  # Because of Wan2.1 I2V
+
     if hasattr(inputs, "attention_mask"):
         input_mask = inputs.attention_mask
+        if isinstance(input_mask, list):
+            input_mask = torch.tensor(input_mask)  # Because of Wan2.1 I2V
     else:
         input_mask = None
 
-    inputs_2 = tokenizer_2(captions)
-    input_ids_2 = inputs_2.input_ids
-    if hasattr(inputs_2, "attention_mask"):
-        input_mask_2 = inputs_2.attention_mask
-    else:
-        input_mask_2 = None
+    input_ids_2 = None
+    input_mask_2 = None
+    if tokenizer_2 is not None:
+        inputs_2 = tokenizer_2(captions)
+        input_ids_2 = inputs_2.input_ids
+        if hasattr(inputs_2, "attention_mask"):
+            input_mask_2 = inputs_2.attention_mask
 
     return input_ids, input_mask, input_ids_2, input_mask_2
 
 
+def _preprocess_images(
+    images: Iterable,
+    train_transforms: callable = None,
+) -> List[Dict[str, torch.Tensor]]:
+
+    dataset = [image.convert("RGB") for image in images]
+    if train_transforms:
+        dataset = [train_transforms(data) for data in dataset]
+
+    outputs: Dict[str, List[torch.Tensor]] = {"pixel_values": dataset}
+    return outputs
+
+
+def _preprocess_videos(
+    videos: Iterable,
+    num_frames: int,
+    train_transforms: callable = None,
+    image_processor: callable = None,
+) -> List[Dict[str, torch.Tensor]]:
+    outputs: Dict[str, List[torch.Tensor]] = {"pixel_values": []}
+    if image_processor is not None:
+        outputs["processed_image"] = []
+
+    for video in videos:
+        current_length = len(video)
+
+        if num_frames > current_length:
+            if safely_eval_as_bool(os.getenv("PAD_VIDEOS_TO_NUM_FRAMES", "false")):
+                # If num_frames is greater than the current length, pad with last frame
+                pad_length = num_frames - current_length
+                video = video.get_batch(list(range(current_length))).asnumpy()
+                video = np.concatenate(
+                    [
+                        video,
+                        np.tile(video[-1], (pad_length, 1, 1, 1)),
+                    ],
+                    axis=0,
+                )
+            else:
+                raise ValueError(
+                    f"num_frames={num_frames} is longer than input video length {current_length}"
+                )
+        else:
+            video = video.get_batch(list(range(num_frames))).asnumpy()
+
+        if image_processor is not None:
+            image = video[0]  # first frame of the video
+            image = image_processor(images=image, return_tensors="pt")["pixel_values"][
+                0
+            ]
+            outputs["processed_image"].append(image)
+
+        if train_transforms:
+            video = torch.stack(
+                [
+                    train_transforms(torchvision.transforms.ToPILImage()(frame))
+                    for frame in video
+                ]
+            )
+
+        outputs["pixel_values"].append(video)
+
+    return outputs
+
+
 def preprocess_train(
     examples: dict[str, torch.Tensor],
-    tokenizer,
-    tokenizer_2,
-    train_transforms=None,
-    num_frames: int = 30,
+    args: argparse.Namespace,
+    tokenizer: callable,
+    tokenizer_2: callable,
+    image_processor: callable = None,
+    train_transforms: callable = None,
+    ignore_keys: List[str] = ["image", "video", "prompt"],
 ) -> dict[str, torch.Tensor]:
     """Preprocess training examples by transforming images and tokenizing captions.
 
     Args:
-        examples (dict): A dictionary containing image data under the key "image".
-            Each item in examples["image"] should be a PIL image with a 'filename' attribute.
+        examples (dict): A dictionary containing the input data.
+        args (argparse.Namespace): Training args
         tokenizer (Tokenizer): The first tokenizer to process the captions.
         tokenizer_2 (Tokenizer): The second tokenizer to process the captions.
+        image_processor: (ImageProcessor): Optional image preprocessor
         train_transforms (callable): A function or transform to apply to each image.
+        ignore_keys (list): A list of keys to be excluded from the data as a postprocessing step.
 
     Returns:
         dict: The updated examples dictionary with the following keys added:
-            - "pixel_values": List of transformed image tensors.
+            - "pixel_values": List of transformed image/video tensors.
             - "input_ids": Tensor of tokenized captions from the first tokenizer.
-            - "input_ids_2": Tensor of tokenized captions from the second tokenizer.
+            - "input_mask": First tokenizer attention mask.
+            - "input_ids_2" (optional): Tensor of tokenized captions from the optional second tokenizer.
+            - "input_mask_2" (optional): Optional second tokenizer attention mask.
     """
     if "image" in examples.keys():
-        dataset = [image.convert("RGB") for image in examples["image"]]
-        if train_transforms:
-            dataset = [train_transforms(data) for data in dataset]
+        images = examples["image"]
+        outputs = _preprocess_images(
+            images=images,
+            train_transforms=train_transforms,
+        )
+
     elif "video" in examples.keys():
-        dataset = []
-        for video in examples["video"]:
-            current_length = len(video)
+        num_frames = args.num_frames
+        videos = examples["video"]
+        outputs = _preprocess_videos(
+            videos=videos,
+            num_frames=num_frames,
+            train_transforms=train_transforms,
+            image_processor=image_processor,
+        )
+    else:
+        raise NotImplementedError("Only 'image' and 'video' are supported currently.")
 
-            if num_frames > current_length:
-                if safely_eval_as_bool(os.getenv("PAD_VIDEOS_TO_NUM_FRAMES", "false")):
-                    # If num_frames is greater than the current length, pad with zeros
-                    pad_length = num_frames - current_length
-                    zero_frames = np.zeros_like(video.get_batch([0]).asnumpy())
-                    video = np.concatenate(
-                        [
-                            video.get_batch(list(range(current_length))).asnumpy(),
-                            np.tile(zero_frames, (pad_length, 1, 1, 1)),
-                        ],
-                        axis=0,
-                    )
-                else:
-                    raise ValueError(
-                        f"num_frames={num_frames} is longer than input video length {current_length}"
-                    )
-            else:
-                video = video.get_batch(list(range(num_frames))).asnumpy()
+    # Tokenize captions: these may potentially contain null values
+    keys = ["input_ids", "input_mask", "input_ids_2", "input_mask_2"]
+    values = tokenize_captions(examples, tokenizer, tokenizer_2)
+    outputs.update(dict(zip(keys, values)))
 
-            if train_transforms:
-                video = torch.stack(
-                    [
-                        train_transforms(torchvision.transforms.ToPILImage()(frame))
-                        for frame in video
-                    ]
-                )
+    # Only keep the non-null fields, that are not ignored by `ignore_keys`
+    keys_to_remove = [
+        key for key, value in outputs.items() if value is None or key in ignore_keys
+    ]
+    # Remove the keys marked for removal
+    for key in keys_to_remove:
+        outputs.pop(key)
 
-            dataset.append(video)
-
-    examples["pixel_values"] = dataset
-    (
-        examples["input_ids"],
-        examples["input_mask"],
-        examples["input_ids_2"],
-        examples["input_mask_2"],
-    ) = tokenize_captions(examples, tokenizer, tokenizer_2)
-    return examples
+    return outputs
 
 
-def collate_fn(examples: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def collate_fn(
+    sample_dicts: List[Dict[str, Union[np.ndarray, torch.Tensor]]],
+    output_as_numpy: bool = False,
+    combine_with: callable = torch.stack,
+    included_keys: Optional[List[str]] = None,
+) -> Dict[str, torch.Tensor]:
     """Collate a list of examples into a batch for DataLoader.
 
     Args:
-        examples (list): A list of examples, where each example is a dictionary containing:
-            - "pixel_values": Tensor of transformed image data.
-            - "input_ids": Tensor of tokenized captions from the first tokenizer.
-            - "input_ids_2": Tensor of tokenized captions from the second tokenizer.
-
+        sample_dicts (list): A list of sample dictionaries,
+            each containing data to be collated, where data can be torch.Tensor or np.ndarray.
+        output_as_numpy (bool): Whether to return the collated data as numpy.ndarray or torch.Tensor.
+        combine_with (callable): Function to combine the data with (e.g., torch.stack or torch.cat).
+        included_keys (optional list): If specified, only these keys will be kept for the collation.
+            Otherwise all available keys will be kept.
     Returns:
-        dict: A dictionary containing batched tensors:
-            - "pixel_values" (torch.Tensor): Batched image tensors of shape (batch_size, C, H, W).
-            - "input_ids" (torch.Tensor): Batched token IDs from the first tokenizer.
-            - "input_ids_2" (torch.Tensor): Batched token IDs from the second tokenizer.
+        dict: A dictionary containing batched tensors as
+            np.ndarray (output_as_numpy=True) or torch.Tensor (output_as_numpy=False).
     """
-    pixel_values = torch.stack([example["pixel_values"] for example in examples])
-    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-    input_ids = torch.stack([example["input_ids"] for example in examples])
-    input_ids_2 = torch.stack([example["input_ids_2"] for example in examples])
-    input_mask = torch.stack([example["input_mask"] for example in examples])
-    input_mask_2 = torch.stack([example["input_mask_2"] for example in examples])
-    return {
-        "pixel_values": pixel_values,
-        "input_ids": input_ids,
-        "input_mask": input_mask,
-        "input_ids_2": input_ids_2,
-        "input_mask_2": input_mask_2,
-    }
 
+    def _convert_to_torch_tensor(
+        x: Union[torch.Tensor, np.ndarray],
+    ) -> torch.Tensor:
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
 
-def cache_collate_fn(batch: Iterable[Any]) -> dict[str, torch.Tensor]:
-    # `batch` is a list of items returned by `__getitem__`.
-    # If `__getitem__` returns a tuple of (latent, text_encoding), like before:
-    latents, pooled_prompt_embeds, prompt_embeds, input_mask, input_mask_2 = zip(*batch)
-    # Convert to tensors and stack them
-    latents = torch.stack(latents, dim=0)
-    pooled_prompt_embeds = torch.stack(pooled_prompt_embeds, dim=0)
-    prompt_embeds = torch.stack(prompt_embeds, dim=0)
-    input_mask = torch.stack(input_mask, dim=0)
-    input_mask_2 = torch.stack(input_mask_2, dim=0)
-    # Return a dictionary
-    return {
-        "latents": latents,
-        "pooled_prompt_embeds": pooled_prompt_embeds,
-        "prompt_embeds": prompt_embeds,
-        "input_mask": input_mask,
-        "input_mask_2": input_mask_2,
-    }
+        return x
+
+    def _convert_to_target_instance(
+        x: Union[torch.Tensor, np.ndarray],
+    ) -> Union[torch.Tensor, np.ndarray]:
+        if output_as_numpy:
+            if isinstance(x, torch.Tensor):
+                return x.numpy()
+
+        elif isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+
+        return x
+
+    batch = {}
+
+    # List of keys to check for and collate
+    included_keys = included_keys or set(sample_dicts[0].keys())
+
+    # Check for each key in possible_keys, collating if present in examples
+    for key in included_keys:
+        value = combine_with(
+            [_convert_to_torch_tensor(example[key]) for example in sample_dicts]
+        )
+
+        # Optionally, apply specific tensor formatting (e.g., contiguous) for certain keys
+        if key == "pixel_values":
+            value = value.to(memory_format=torch.contiguous_format).float()
+
+        batch[key] = _convert_to_target_instance(value)
+
+    return batch

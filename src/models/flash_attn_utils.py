@@ -143,7 +143,7 @@ def flash_attn_sdpa(
           functions and permutes the output back to the original shape.
     """
     query, key, value = [
-        x.transpose(1, 2) for x in [query, key, value]
+        x.transpose(1, 2).contiguous() for x in [query, key, value]
     ]  # (bs, n, s, hd) -> (bs, s, n, hd)
     if attn_mask is not None:
         # Check if attn_mask is castable to bool

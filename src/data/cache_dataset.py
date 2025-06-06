@@ -1,52 +1,74 @@
-import os
-
 import numpy as np
 import torch
+import xarray as xr
 from torch.utils.data import Dataset
+
+
+def create_or_append_to_xr_dataset(
+    data_dict: dict[str, np.ndarray], cache_file: str
+) -> xr.Dataset:
+    """
+    Constructs or appends to an xarray.Dataset from a dictionary of numpy arrays,
+    ensuring dimension uniqueness by renaming, with 'batch_dim' labeled for the first dimension.
+    This function writes to a Zarr store on-the-fly.
+
+    Parameters:
+        data_dict: A dictionary where the keys are strings representing variable names
+                   and the values are numpy arrays representing the data.
+        cache_file: The path where the Zarr store will be saved (dir/filename.zarr).
+
+    Returns:
+        An xarray.Dataset constructed or appended to with uniquely renamed dimensions,
+        with the first dimension labeled as 'batch_dim' and stored on disk.
+    """
+
+    data_arrays = [
+        xr.DataArray(data=value, name=key).rename(
+            {
+                da.dims[0]: "batch_dim",
+                **{dim: f"{key}_dim{i}" for i, dim in enumerate(da.dims) if i > 0},
+            }
+        )
+        for key, value in data_dict.items()
+        for da in [xr.DataArray(data=value)]
+    ]
+
+    # Append dataset to Zarr store
+    dataset = xr.Dataset({da.name: da for da in data_arrays})
+    dataset.to_zarr(cache_file, mode="a", consolidated=False)
+    return dataset
 
 
 class CacheDataset(Dataset):
     """Dataset for loading the cached latents and encodings."""
 
-    def __init__(self, cache_dir, dtype):
-        """Loads the encodings in read mode for faster initialization.
+    def __init__(self, cache_file: str, dtype: torch.dtype):
+        """Loads the cached encodings in read mode for faster initialization.
+        Data is converted into torch.Tensors of given `dtype`.
 
         Args:
-            cache_dir (str): The path to the cached latents and text encodings
+            cache_file (str): The path to the cached zarr file containing e.g latents and text encodings.
+            dtype (torch.dtype): The datatype to cast the data into.
         """
-        self.latents = np.load(os.path.join(cache_dir, "latents.npy"), mmap_mode="r")
-        self.pooled_prompt_embeds = np.load(
-            os.path.join(cache_dir, "pooled_prompt_embeds.npy"), mmap_mode="r"
-        )
-        self.prompt_embeds = np.load(
-            os.path.join(cache_dir, "prompt_embeds.npy"), mmap_mode="r"
-        )
-        self.input_mask = np.load(
-            os.path.join(cache_dir, "input_mask.npy"), mmap_mode="r"
-        )
-        self.input_mask_2 = np.load(
-            os.path.join(cache_dir, "input_mask_2.npy"), mmap_mode="r"
-        )
+        self.cached_dataset = xr.open_zarr(cache_file, consolidated=False)
+        self.keys = self.cached_dataset.data_vars.keys()
         self.dtype = dtype
-        # Check that all the embeds and latents have the same length
-        assert len(self.latents) == len(self.pooled_prompt_embeds) and len(
-            self.pooled_prompt_embeds
-        ) == len(
-            self.prompt_embeds
-        ), f"{self.latents.shape=}, {self.pooled_prompt_embeds.shape=}, {self.prompt_embeds.shape=}"
+
+        # Check same length for all arrays using 'batch_dim'
+        length_set = set(var.sizes["batch_dim"] for var in self.cached_dataset.values())
+        assert len(length_set) == 1, f"Arrays have different lengths: {length_set}"
 
     def __len__(self):
-        return len(self.latents)
+        return self.cached_dataset.sizes["batch_dim"]
 
     def __getitem__(self, idx):
-        # Access individual samples directly by index
-        latent = torch.from_numpy(np.copy(self.latents[idx])).to(self.dtype)
-        pooled_prompt_embeds = torch.from_numpy(
-            np.copy(self.pooled_prompt_embeds[idx])
-        ).to(self.dtype)
-        prompt_embeds = torch.from_numpy(np.copy(self.prompt_embeds[idx])).to(
-            self.dtype
+        output_data = {}
+        # Use .isel() for index-based (lazy) selection
+        batch_slice = self.cached_dataset.isel(batch_dim=idx).compute(
+            scheduler="synchronous"
         )
-        input_mask = torch.from_numpy(np.copy(self.input_mask[idx])).to(self.dtype)
-        input_mask_2 = torch.from_numpy(np.copy(self.input_mask_2[idx])).to(self.dtype)
-        return latent, pooled_prompt_embeds, prompt_embeds, input_mask, input_mask_2
+        for key in self.keys:
+            array = batch_slice[key].values.astype(np.float32)
+            output_data[key] = torch.from_numpy(array).to(self.dtype)
+
+        return output_data

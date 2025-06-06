@@ -41,3 +41,4 @@ analysis_notebook.html
 logs/traces/*
 .env
 local.mk
+outputs

@@ -132,24 +132,24 @@ class StableDiffusionXLModel(BaseModel):
 
         return pooled_prompt_embeds, prompt_embeds
 
-    def additional_conditionals(
-        self, batch: dict, timesteps: torch.Tensor
+    def get_model_inputs(
+        self,
+        batch: Dict[str, torch.tensor],
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
-        """Creates any additional conditionals required for the diffusion process.
-
+        """Creates any additional conditionals required for the StableDiffusionXL model.
+        https://github.com/huggingface/diffusers/blob/97fda1b75c70705b245a462044fedb47abb17e56/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1213C39-L1213C50
         Args:
             batch (dict): Batch's data.
-            timesteps (torch.Tensor): The timesteps for which conditionals are calculated.
 
         Returns:
-            tuple:
-                - dict: A dictionary containing "sample" and "added_cond_kwargs".
-                - torch.Tensor: The same timesteps tensor provided as input.
+            - dict: A dictionary containing: "hidden_states", "encoder_hidden_states", "pooled_projections", "img_ids", and "txt_ids"
+            - torch.Tensor: Timesteps
         """
-        # Ref. https://github.com/huggingface/diffusers/blob/97fda1b75c70705b245a462044fedb47abb17e56/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1213C39-L1213C50
+        output = {}
+        output["sample"] = batch["noised_latents"]
+        output["encoder_hidden_states"] = batch["prompt_embeds"]
         pooled_prompt_embeds = batch["pooled_prompt_embeds"]
         text_encoder_projection_dim = int(pooled_prompt_embeds.shape[-1])
-
         # TODO: These should come from the dataset's metadata
         time_ids = self.pipe._get_add_time_ids(
             (self.width, self.height),
@@ -161,14 +161,11 @@ class StableDiffusionXLModel(BaseModel):
 
         batch_size = pooled_prompt_embeds.shape[0]
         time_ids = time_ids[None, :, :].repeat(batch_size, 1, 1)
-
-        return {
-            "sample": batch["noised_latents"],
-            "added_cond_kwargs": {
-                "text_embeds": pooled_prompt_embeds,
-                "time_ids": time_ids,
-            },
-        }, timesteps
+        output["added_cond_kwargs"] = {
+            "text_embeds": pooled_prompt_embeds,
+            "time_ids": time_ids,
+        }
+        return output, batch["timestep"]
 
     def compute_loss(
         self, pred, noise, latents=None, timesteps=None, snr_gamma: float = 5.0
@@ -213,10 +210,9 @@ class StableDiffusionXLModel(BaseModel):
     def sample_timesteps_and_noise(
         self,
         latents: torch.Tensor,
-        sigmas: torch.Tensor,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sample timesteps and apply noise to latents using the scheduler."""
         return compute_uniform_timestep_sampling(
-            self.submodules["scheduler"], latents, sigmas
+            self.submodules["scheduler"], latents, self.sigmas
         )

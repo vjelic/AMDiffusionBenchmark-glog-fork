@@ -51,6 +51,7 @@ def dummy_args():
         resolution=(512, 512),
         shift=3.0,
         substitute_sdpa_with_flash_attn=False,
+        gradient_checkpointing=0.0,
     )
 
 
@@ -119,12 +120,18 @@ def test_base_model_init(dummy_args):
     We patch init_modules_from_pipeline so that a dummy denoiser (with attn_processors)
     is set and the call in the constructor doesn't fail.
     """
-    with patch.object(
-        BaseModel,
-        "init_modules_from_pipeline",
-        new=lambda self: setattr(self, "denoiser", MagicMock(attn_processors={})),
-    ):
+    # Create a mock scheduler with necessary attributes
+    mock_scheduler = MagicMock()
+    mock_scheduler.timesteps = MagicMock()
+    mock_scheduler.config.num_train_timesteps = MagicMock()
+
+    def init_modules_mock(self):
+        self.denoiser = MagicMock(attn_processors={})
+        self.submodules = {"scheduler": mock_scheduler}
+
+    with patch.object(BaseModel, "init_modules_from_pipeline", new=init_modules_mock):
         model = BaseModel(dummy_args)
+
     assert model.args is dummy_args
     # Since we bypassed normal module initialization, pipe remains None.
     assert model.pipe is None

@@ -31,7 +31,7 @@ def test_parse_log_file_complex_rocm_oom(tmp_path):
     log_content = r"""
         [rank5]: torch.OutOfMemoryError: HIP out of memory. Tried to allocate 198.00 MiB.
         [rank2]: Traceback (most recent call last):
-        2025-01-09 11:22:40,246 - INFO - Step 1: {'step_loss': 0.41044700145721436, 'step_time': 7.534288167953491, 'fps_gpu': 1.0618123201110594, 'tflops/s': 52.04832654729589}
+        2025-01-09 11:22:40,246 - INFO - Step 1: {'step_loss': 0.41044700145721436, 'step_time_total': 7.534288167953491, 'fps_gpu': 1.0618123201110594, 'tflops/s': 52.04832654729589}
         """
     logfile = tmp_path / "oom.log"
     logfile.write_text(log_content)
@@ -40,8 +40,8 @@ def test_parse_log_file_complex_rocm_oom(tmp_path):
     assert metrics["status"] == process_logs.STATUS_OOM
     assert metrics["num_samples"] == 1
     assert np.isclose(metrics["avg_loss"], 0.410447, atol=1e-5)
-    assert np.isclose(metrics["avg_time"], 7.534288, atol=1e-5)
-    assert np.isclose(metrics["avg_fps"], 1.0618123, atol=1e-5)
+    assert np.isclose(metrics["avg_step_time_total"], 7.534288, atol=1e-5)
+    assert np.isclose(metrics["avg_fps_gpu"], 1.0618123, atol=1e-5)
     assert np.isclose(metrics["avg_tflops"], 52.0483265, atol=1e-5)
 
 
@@ -53,7 +53,7 @@ def test_parse_log_file_complex_cuda_oom(tmp_path):
     log_content = r"""
         [rank2]: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 256.00 MiB.
         [rank2]: Traceback (most recent call last):
-        2025-01-09 11:22:40,246 - INFO - Step 1: {'step_loss': 0.41044700145721436, 'step_time': 7.534288167953491, 'fps_gpu': 1.0618123201110594, 'tflops/s': 52.04832654729589}
+        2025-01-09 11:22:40,246 - INFO - Step 1: {'step_loss': 0.41044700145721436, 'step_time_total': 7.534288167953491, 'fps_gpu': 1.0618123201110594, 'tflops/s': 52.04832654729589}
         """
     logfile = tmp_path / "oom.log"
     logfile.write_text(log_content)
@@ -62,8 +62,8 @@ def test_parse_log_file_complex_cuda_oom(tmp_path):
     assert metrics["status"] == process_logs.STATUS_OOM
     assert metrics["num_samples"] == 1
     assert np.isclose(metrics["avg_loss"], 0.410447, atol=1e-5)
-    assert np.isclose(metrics["avg_time"], 7.534288, atol=1e-5)
-    assert np.isclose(metrics["avg_fps"], 1.0618123, atol=1e-5)
+    assert np.isclose(metrics["avg_step_time_total"], 7.534288, atol=1e-5)
+    assert np.isclose(metrics["avg_fps_gpu"], 1.0618123, atol=1e-5)
     assert np.isclose(metrics["avg_tflops"], 52.0483265, atol=1e-5)
 
 
@@ -73,7 +73,7 @@ def test_parse_log_file_traceback_error(tmp_path):
     even if logs contain valid steps.
     """
     log_content = r"""
-        2025-01-09 11:22:42,233 - INFO - Step 2: {'step_loss': 0.4012545943260193, 'step_time': 1.8575315, 'fps_gpu': 4.30679, 'tflops/s': 52.04832654729589}
+        2025-01-09 11:22:42,233 - INFO - Step 2: {'step_loss': 0.4012545943260193, 'step_time_total': 1.8575315, 'fps_gpu': 4.30679, 'tflops/s': 52.04832654729589}
         [rank2]: Traceback (most recent call last):
             ValueError("some error")
         """
@@ -92,10 +92,10 @@ def test_parse_log_file_multiple_steps_no_error(tmp_path):
     and end up with status=SUCCESS if no OOM or errors exist.
     """
     content = r"""
-        2025-01-09 11:22:40,246 - INFO - Step 1: {'step_loss': 0.4104, 'step_time': 7.5342, 'fps_gpu': 1.0618, 'tflops/s': 52.04832654729589}
-        2025-01-09 11:22:42,233 - INFO - Step 2: {'step_loss': 0.4012, 'step_time': 1.8575, 'fps_gpu': 4.3067, 'tflops/s': 276.1793374846529}
-        2025-01-09 11:22:44,219 - INFO - Step 3: {'step_loss': 0.4387, 'step_time': 1.8597, 'fps_gpu': 4.3016, 'tflops/s': 275.70271792899825}
-        2025-01-09 11:22:46,209 - INFO - Step 4: {'step_loss': 0.4513, 'step_time': 1.8614, 'fps_gpu': 4.2977, 'tflops/s': 275.5930278356191}
+        2025-01-09 11:22:40,246 - INFO - Step 1: {'step_loss': 0.4104, 'step_time_total': 7.5342, 'fps_gpu': 1.0618, 'tflops/s': 52.04832654729589}
+        2025-01-09 11:22:42,233 - INFO - Step 2: {'step_loss': 0.4012, 'step_time_total': 1.8575, 'fps_gpu': 4.3067, 'tflops/s': 276.1793374846529}
+        2025-01-09 11:22:44,219 - INFO - Step 3: {'step_loss': 0.4387, 'step_time_total': 1.8597, 'fps_gpu': 4.3016, 'tflops/s': 275.70271792899825}
+        2025-01-09 11:22:46,209 - INFO - Step 4: {'step_loss': 0.4513, 'step_time_total': 1.8614, 'fps_gpu': 4.2977, 'tflops/s': 275.5930278356191}
         """
     logfile = tmp_path / "normal_steps.log"
     logfile.write_text(content)
@@ -172,12 +172,12 @@ def test_generate_dataframe_new_runs(tmp_path, mock_git_info):
         existing_csv = tmp_path / "runs_summary.csv"
         existing_csv.write_text("run_id,status,avg_loss\n5,success,0.22\n")
 
-        (tmp_path / "1_config.yaml").write_text(
+        (tmp_path / "1_config_test.yaml").write_text(
             "accelerate_config:\n  testA: 1\ntrain_args:\n  foo: 'bar'"
         )
-        (tmp_path / "1_logs.txt").write_text("INFO - Step 1 => step_loss': 1.0\n")
+        (tmp_path / "1_logs_test.txt").write_text("INFO - Step 1 => step_loss': 1.0\n")
 
-        (tmp_path / "5_config.yaml").write_text(
+        (tmp_path / "5_config_test.yaml").write_text(
             "accelerate_config:\n  testB: 2\ntrain_args:\n  bar: 10"
         )
 
@@ -245,11 +245,12 @@ def test_process_run_no_logs(tmp_path, mock_git_info):
     """
     Test processing of run with valid configuration but no log file.
     """
-    (tmp_path / "10_config.yaml").write_text(
+    run_name = "test"
+    (tmp_path / f"10_config_{run_name}.yaml").write_text(
         "accelerate_config:\n  x: 5\ntrain_args:\n  y: 10\n"
     )
     result = process_logs.process_run(
-        10, str(tmp_path), warmup_steps=1, git_info=mock_git_info
+        10, run_name, str(tmp_path), warmup_steps=1, git_info=mock_git_info
     )
     assert result["run_id"] == 10
     assert result["status"] == process_logs.STATUS_NOTRUN
@@ -261,13 +262,14 @@ def test_process_run_with_logs(tmp_path, mock_git_info):
     """
     Test processing of run logs with valid configuration and log files.
     """
-    (tmp_path / "11_config.yaml").write_text(
+    run_name = "test"
+    (tmp_path / f"11_config_{run_name}.yaml").write_text(
         "accelerate_config:\n  p: 1.23\ntrain_args:\n  q: 4.56\n"
     )
     log_content = "INFO - Step 1 => step_loss': 0.9\nINFO - Step 2 => step_loss': 0.7\n"
-    (tmp_path / "11_logs.txt").write_text(log_content)
+    (tmp_path / f"11_logs_{run_name}.txt").write_text(log_content)
     out = process_logs.process_run(
-        11, str(tmp_path), warmup_steps=0, git_info=mock_git_info
+        11, run_name, str(tmp_path), warmup_steps=0, git_info=mock_git_info
     )
     assert out["run_id"] == 11
     assert out["status"] == process_logs.STATUS_SUCCESS

@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -5,9 +6,8 @@ import numpy as np
 import torch
 
 # Import the functions and classes to be tested
-from src.data.cache_dataset import CacheDataset
+from src.data.cache_dataset import CacheDataset, create_or_append_to_xr_dataset
 from src.data.datasets_utils import (
-    cache_collate_fn,
     collate_fn,
     preprocess_train,
     tokenize_captions,
@@ -50,6 +50,8 @@ def test_preprocess_train():
     Check that the images and captions are properly transformed according to the input transform.
     Check that the expected output shapes align with the inputs.
     """
+    # Create dummy args
+    dummy_args = argparse.Namespace(num_frames=9)
     # Create two mock images with captions as filenames and a RGB method that creates an image
     image1 = MagicMock()
     image1.filename = "example_caption.png"
@@ -79,7 +81,13 @@ def test_preprocess_train():
     )
 
     # Check that the code executes correctly
-    outputs = preprocess_train(batch, tokenizer_1, tokenizer_2, transform)
+    outputs = preprocess_train(
+        examples=batch,
+        args=dummy_args,
+        tokenizer=tokenizer_1,
+        tokenizer_2=tokenizer_2,
+        train_transforms=transform,
+    )
 
     # Check that the tokenizers was called with the correct captions
     assert tokenizer_1.call_args[0][0] == ["example caption", "example caption two"]
@@ -88,14 +96,52 @@ def test_preprocess_train():
     # Check that the putputs are the correct shape
     assert outputs["input_ids"].shape == (2, 48)
     assert outputs["input_ids_2"].shape == (2, 16, 48)
-    assert outputs["pixel_values"][0].shape == (1, 3, 4, 4)
-    assert outputs["pixel_values"][1].shape == (1, 3, 4, 4)
+    for i in range(2):
+        assert outputs["pixel_values"][i].shape == (
+            1,
+            3,
+            4,
+            4,
+        ), f"Image {i} not transformed correctly"
 
     # Check that no transforms yields expected outputs
-    outputs = preprocess_train(batch, tokenizer_1, tokenizer_2)
+    outputs = preprocess_train(
+        examples=batch,
+        args=dummy_args,
+        tokenizer=tokenizer_1,
+        tokenizer_2=tokenizer_2,
+    )
 
-    assert outputs["pixel_values"][0].shape == (1, 3, 16, 16)
-    assert outputs["pixel_values"][1].shape == (1, 3, 16, 16)
+    for _output in outputs["pixel_values"]:
+        assert _output.shape == (1, 3, 16, 16)
+
+    # Test on videos
+    # Create two mock videos with captions as filenames and a RGB method that creates an image
+    video1 = MagicMock()
+    video1.get_batch.return_value.asnumpy.return_value = torch.randn(
+        9, 3, 16, 16
+    ).numpy()
+    video1.__len__ = lambda _: 9
+    video2 = MagicMock()
+    video2.get_batch.return_value.asnumpy.return_value = torch.randn(
+        9, 3, 16, 16
+    ).numpy()
+    video2.__len__ = lambda _: 9
+    batch = {"video": (video1, video2), "prompt": ("video 1", "video 2")}
+    image_processor = MagicMock()
+    image_processor.return_value = {"pixel_values": torch.randn(1, 16, 4, 4)}
+
+    outputs = preprocess_train(
+        examples=batch,
+        args=dummy_args,
+        tokenizer=tokenizer_1,
+        tokenizer_2=tokenizer_2,
+        image_processor=image_processor,
+    )
+    for _output in outputs["pixel_values"]:
+        assert _output.shape == (9, 3, 16, 16)
+    for _output in outputs["processed_image"]:
+        assert _output.shape == (16, 4, 4)
 
 
 def test_collate_fn():
@@ -131,63 +177,28 @@ def test_collate_fn():
     assert isinstance(collated_outputs["pixel_values"], torch.Tensor)
 
 
-def test_collate_cache_fn():
-    """
-    Verify that the inputs are properly collated by checking shapes.
-    """
-    # Create batch input
-    batch = []
-    for _ in range(3):
-        latent = torch.randn(3, 16, 16)
-        text_enc = torch.randn(48)
-        text_enc2 = torch.randn(16, 48)
-        mask = torch.randn(48)
-        mask_2 = torch.randn(16, 48)
-        batch.append([latent, text_enc, text_enc2, mask, mask_2])
-
-    # Collate input
-    outputs = cache_collate_fn(batch)
-
-    # Check shapes
-    assert outputs["latents"].shape == (3, 3, 16, 16)
-    assert outputs["pooled_prompt_embeds"].shape == (3, 48)
-    assert outputs["prompt_embeds"].shape == (3, 16, 48)
-    assert outputs["input_mask"].shape == (3, 48)
-    assert outputs["input_mask_2"].shape == (3, 16, 48)
-
-
 def test_cache_dataset(tmp_path: Path):
     """
     Verify that the dataset class is capable of streaming the information in saved python files.
     Check that the saved data aligns with the loaded data.
     """
     # Mock data
-    latents = torch.randn(3, 3, 16, 16)
-    text_enc = torch.randn(3, 48)
-    text_enc2 = torch.randn(3, 16, 48)
-    mask = torch.randn(3, 48)
-    mask_2 = torch.randn(3, 16, 48)
-
+    cached_data = dict(
+        latents=np.random.normal(size=(3, 3, 16, 16)),
+        text_enc=np.random.normal(size=(3, 48)),
+        text_enc2=np.random.normal(size=(3, 16, 48)),
+        mask=np.random.normal(size=(3, 48)),
+        mask_2=np.random.normal(size=(3, 16, 48)),
+    )
     # Save data for dataset to load
-    np.save(tmp_path / "latents.npy", latents)
-    np.save(tmp_path / "pooled_prompt_embeds.npy", text_enc)
-    np.save(tmp_path / "prompt_embeds.npy", text_enc2)
-    np.save(tmp_path / "input_mask.npy", mask)
-    np.save(tmp_path / "input_mask_2.npy", mask_2)
-
+    cache_file = tmp_path / "cached_data.zarr"
+    create_or_append_to_xr_dataset(cached_data, cache_file=cache_file)
     # Check if data was successfully loaded
-    dataset = CacheDataset(tmp_path, torch.float32)
+    dataset = CacheDataset(cache_file, torch.float32)
     assert len(dataset) == 3
 
     # Check if data can be properly accessed
-    for i, data in enumerate(dataset):
-        assert data[0].shape == (3, 16, 16)
-        assert (latents[i] == data[0]).all()
-        assert data[1].shape == (48,)
-        assert (text_enc[i] == data[1]).all()
-        assert data[2].shape == (16, 48)
-        assert (text_enc2[i] == data[2]).all()
-        assert data[3].shape == (48,)
-        assert (mask[i] == data[3]).all()
-        assert data[4].shape == (16, 48)
-        assert (mask_2[i] == data[4]).all()
+    for i, batch in enumerate(dataset):
+        for key, value in cached_data.items():
+            assert key in batch.keys()
+            assert value[i].shape == batch[key].shape

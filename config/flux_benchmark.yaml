@@ -4,6 +4,15 @@ defaults:
   - train_args: flux-dev
   - _self_
 
+accelerate_config:
+  dynamo_config:
+    dynamo_backend: ["no", "inductor"]
+
+train_args:
+  train_batch_size: [1, 10, 17]
+  num_iterations: 20
+  logging_dir: outputs/flux_benchmark
+
 # Override Hydra's run dir to be the same as logging dir. Not setting this may result
 # in errors or unexpected behavior because Hydra by default a run dir `./<date><time>`.
 hydra:

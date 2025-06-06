@@ -1,10 +1,9 @@
 import argparse
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-import torch
 
-from src.trainer import ModelManager, Trainer
+from src.models import ModelManager
 
 
 # Dummy Classes & Fixtures
@@ -118,9 +117,9 @@ def test_get_model_flux(monkeypatch):
     dummy_flux = MagicMock(name="FluxModel")
     monkeypatch.setattr("src.models.flux.FluxModel", dummy_flux)
 
-    cls, model_type = ModelManager().get_model("flux-dev")
+    cls, _, model_output_type = ModelManager().get_model("flux-dev")
     assert cls == dummy_flux
-    assert model_type == "image"
+    assert model_output_type == "image"
 
 
 def test_get_model_hunyuan(monkeypatch):
@@ -128,9 +127,9 @@ def test_get_model_hunyuan(monkeypatch):
     dummy_hunyuan = MagicMock(name="HunyuanVideoModel")
     monkeypatch.setattr("src.models.hunyuan.HunyuanVideoModel", dummy_hunyuan)
 
-    cls, model_type = ModelManager().get_model("hunyuan-video")
+    cls, _, model_output_type = ModelManager().get_model("hunyuan-video")
     assert cls == dummy_hunyuan
-    assert model_type == "video"
+    assert model_output_type == "video"
 
 
 def test_get_model_invalid():

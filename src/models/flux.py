@@ -1,5 +1,5 @@
 import argparse
-from typing import Union
+from typing import Dict, Tuple, Union
 
 import torch
 
@@ -15,7 +15,7 @@ class FluxModel(BaseModel):
     encodes images and text, and constructs latent image IDs suitable for flow matching.
 
     Attributes:
-        hf_id (str): The Hugging Face model identifier (e.g., "black-forest-labs/FLUX.1-dev").
+        hf_id (str): The Hfenugging Face model identifier (e.g., "black-forest-labs/FLUX.1-dev").
         loss_type (str): The type of loss function used for training or inference (e.g., "flow_match").
         guidance (float): Guidance strength for conditioning the model outputs.
         vae_scale_factor (int): Scale factor derived from the VAE configuration.
@@ -177,39 +177,36 @@ class FluxModel(BaseModel):
 
         return pooled_prompt_embeds, prompt_embeds
 
-    def additional_conditionals(
-        self, batch: dict, timesteps: torch.tensor
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        """Creates any additional conditionals required for the FLUX.1 model.
-
+    def get_model_inputs(
+        self,
+        batch: Dict[str, torch.tensor],
+    ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """Creates any additional conditionals required for the FluxTransformer2DModel.forward:
+        https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_flux.py#L389
         Args:
             batch (dict): Batch's data.
-            timesteps (torch.Tensor): The timesteps for which conditionals are calculated.
 
         Returns:
-            tuple:
-                - dict: A dictionary containing "img_ids", "txt_ids", "pooled_projections" and "hidden_states" tensors.
-                - torch.Tensor: The same timesteps tensor provided as input.
+            - dict: A dictionary containing: "hidden_states", "encoder_hidden_states", "pooled_projections", "img_ids", and "txt_ids"
+            - torch.Tensor: Timesteps
         """
-        # Create the image ids
-        image_ids = self.prepare_latent_image_ids(
+        output = {}
+        output["hidden_states"] = batch["noised_latents"]
+        output["encoder_hidden_states"] = batch["prompt_embeds"]
+        output["pooled_projections"] = batch["pooled_prompt_embeds"]
+        output["img_ids"] = self.prepare_latent_image_ids(
             self.height // 2,
             self.width // 2,
             device=self.denoiser.device,
             dtype=self.denoiser.dtype,
         )
-        text_ids = torch.zeros(
+        output["txt_ids"] = torch.zeros(
             batch["prompt_embeds"].shape[1],
             3,
             device=self.denoiser.device,
             dtype=self.denoiser.dtype,
         )
-        return {
-            "pooled_projections": batch["pooled_prompt_embeds"],
-            "hidden_states": batch["noised_latents"],
-            "img_ids": image_ids,
-            "txt_ids": text_ids,
-        }, timesteps
+        return output, batch["timestep"]
 
     def compute_loss(self, pred, noise, latents=None, timesteps=None):
         """Compute the loss for the model.
@@ -232,7 +229,6 @@ class FluxModel(BaseModel):
     def sample_timesteps_and_noise(
         self,
         latents: torch.Tensor,
-        sigmas: torch.Tensor,
         logit_mean: float = 0.0,
         logit_std: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -240,7 +236,7 @@ class FluxModel(BaseModel):
         return compute_density_based_timestep_sampling(
             self.submodules["scheduler"],
             latents,
-            sigmas,
+            self.sigmas,
             logit_mean,
             logit_std,
         )

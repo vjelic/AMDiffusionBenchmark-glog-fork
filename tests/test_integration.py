@@ -1,19 +1,18 @@
 import os
 import subprocess
 import tempfile
-from pathlib import Path
 
 import pytest
 import torch
 from dotenv import load_dotenv
 
-from src.trainer import ModelManager
+from src.models import ModelManager
 from src.utils import safely_eval_as_bool
 
 load_dotenv()
 
 # Define config paths
-BASE_CONFIG = str(Path("config", "single_run.yaml"))
+BASE_CONFIG = "single_run"
 
 
 def run_subprocess_and_check_success(command, success_tag="completed successfully!"):
@@ -50,22 +49,25 @@ def run_subprocess_and_check_success(command, success_tag="completed successfull
 
 
 def get_training_run_command(
-    model: str, tmp_dir: tempfile.TemporaryDirectory, base_config: str = BASE_CONFIG
+    model: str,
+    tmp_dir: tempfile.TemporaryDirectory,
+    base_config: str = BASE_CONFIG,
+    dry_run: bool = False,
 ):
     return [
         "python",
         "launcher.py",
-        "--config_file",
+        "--config-name",
         base_config,
         f"train_args={model}",
-        "--output_dir",
-        tmp_dir,
-        "--no_resume",
+        "++launcher.resume=false",
+        f"++launcher.dry_run={str(dry_run).lower()}",
+        f"++train_args.logging_dir={tmp_dir}",
         "++train_args.train_batch_size=1",
-        "++train_args.resolution=128",
+        "++train_args.resolution=32",
         "++train_args.num_iterations=1",
         "++train_args.max_train_samples=2",
-        "++train_args.use_cache=false",  # too slow otherwise
+        "++train_args.use_cache=0",  # too slow otherwise
     ]
 
 
@@ -74,8 +76,7 @@ def get_training_run_command(
 def test_launcher_with_dry_run(model):
     """Integration test of model configurations in dry-run mode."""
     with tempfile.TemporaryDirectory() as tmp_dir:
-        command = get_training_run_command(model=model, tmp_dir=tmp_dir)
-        command.append("--dry_run")
+        command = get_training_run_command(model=model, tmp_dir=tmp_dir, dry_run=True)
         run_subprocess_and_check_success(command, "All runs completed.")
 
 
@@ -89,5 +90,5 @@ def test_launcher_with_dry_run(model):
 def test_launcher_with_real_run(model):
     """Integration test of model configurations with real runs."""
     with tempfile.TemporaryDirectory() as tmp_dir:
-        command = get_training_run_command(model=model, tmp_dir=tmp_dir)
+        command = get_training_run_command(model=model, tmp_dir=tmp_dir, dry_run=False)
         run_subprocess_and_check_success(command, "completed successfully!")

@@ -48,10 +48,18 @@ repos:
       - id: mixed-line-ending # Normalizes line endings
         args: [--fix=lf] # Normalize line endings to LF
 
+  # Remove unused imports and variables
+  - repo: https://github.com/myint/autoflake
+    rev: v2.1.1
+    hooks:
+    -   id: autoflake
+        args: [--remove-all-unused-imports, --in-place]
+        name: remove unused imports and variables
+
   # Optional hooks (disabled by default)
   # Enable with: pre-commit run --hook-stage manual --all-files
   - repo: https://github.com/pycqa/flake8
-    rev: 7.1.2
+    rev: 7.2.0
     hooks:
       - id: flake8 # Lint Python files
         additional_dependencies: [flake8-docstrings]

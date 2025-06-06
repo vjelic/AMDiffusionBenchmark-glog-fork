@@ -1,5 +1,5 @@
 # Start from ROCm capable base image
-FROM rocm/pytorch-training:v25.2
+FROM rocm/pytorch-training:v25.4
 RUN pip3 uninstall tb-nightly -y
 WORKDIR /workspace
 

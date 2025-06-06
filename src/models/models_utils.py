@@ -2,6 +2,11 @@ import torch
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.training_utils import compute_density_for_timestep_sampling
 
+from src.utils import configure_logging
+
+# Configure the logger for outputs to terminal
+logger = configure_logging()
+
 
 def compute_density_based_timestep_sampling(
     scheduler: SchedulerMixin,
@@ -41,7 +46,9 @@ def compute_density_based_timestep_sampling(
 
     # Sample noise and apply it to the latents
     noise = torch.randn_like(latents)
-    sigmas_expanded = sigmas[indices].view(-1, *([1] * (noise.ndim - 1)))
+    sigmas_expanded = sigmas.to(latents.device)[indices].view(
+        -1, *([1] * (noise.ndim - 1))
+    )
     noised_latents = (sigmas_expanded * noise + (1.0 - sigmas_expanded) * latents).to(
         latents.dtype
     )
@@ -76,9 +83,65 @@ def compute_uniform_timestep_sampling(
     num_steps = scheduler.config.num_train_timesteps
     timesteps = torch.randint(0, num_steps, (latents.shape[0],), device=latents.device)
     # Use the passed sigmas: select sigma values based on sampled timesteps
-    sigmas_expanded = sigmas[timesteps].view(-1, *([1] * (latents.ndim - 1)))
+    sigmas_expanded = sigmas.to(latents.device)[timesteps].view(
+        -1, *([1] * (latents.ndim - 1))
+    )
 
     # Sample noise and apply it to the latents
     noise = torch.randn_like(latents)
     noised_latents = latents + noise * sigmas_expanded
     return noised_latents, noise, timesteps
+
+
+def get_attention_processors(module, processors=None):
+    """
+    Recursively get the attention processors.
+
+    Args:
+        module (Any): The module from which to start retrieval.
+        processors (dict): Dictionary to store processors.
+
+    Returns:
+        dict: All attention processors throughout the model.
+    """
+
+    if processors is None:
+        processors = {}
+
+    for name, sub_module in module.named_children():
+        if hasattr(sub_module, "processor"):
+            processors[name] = sub_module.processor
+        else:
+            # Recurse into child modules
+            get_attention_processors(sub_module, processors)
+
+    return processors
+
+
+def set_attention_processors(processor_dict, module):
+    """
+    Recursively set the attention processors.
+
+    Args:
+        processor_dict (dict): A dictionary of processors to set.
+        module (Any): The module in which to start setting.
+    """
+
+    for name, sub_module in module.named_children():
+        if name in processor_dict:
+            processor = processor_dict[name]
+            if (
+                hasattr(sub_module, "processor")
+                and isinstance(sub_module.processor, torch.nn.Module)
+                and not isinstance(processor, torch.nn.Module)
+            ):
+                logger.info(
+                    f"You are removing possibly trained weights of {sub_module.processor} with {processor}"
+                )
+                sub_module._modules.pop("processor")
+
+            # Set the new processor
+            sub_module.processor = processor
+        else:
+            # Recurse into child modules
+            set_attention_processors(processor_dict, sub_module)

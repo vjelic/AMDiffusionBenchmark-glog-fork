@@ -22,23 +22,23 @@ python launcher.py \
 
 The script generates a runs_summary.csv with metrics and metadata for analysis.
 """
-
-import argparse
 import datetime
 import itertools
 import logging
 import os
+import re
 import subprocess
+import sys
 import tempfile
 import time
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List
 
 import git
+import hydra
 import pandas as pd
 import yaml
 from dotenv import load_dotenv
 from flatten_dict import flatten, unflatten
-from hydra import compose, initialize
 from omegaconf import DictConfig, OmegaConf
 
 from src.constants import (
@@ -69,106 +69,7 @@ logging.basicConfig(
 load_dotenv()
 
 
-def parse_args() -> Tuple[argparse.Namespace, DictConfig]:
-    """Parses command-line arguments.
-
-    Returns:
-        argparse.Namespace: Parsed command-line arguments with parameters:
-            config_file: Path to the YAML parameter configuration file
-            output_dir: Directory for output logs and configs
-            dry_run: Whether to do a dry run without execution
-            warmup_steps: Number of initial steps to exclude from averages
-            no-resume: Whether to skip completed or failed OOM runs
-            no-skip_larger_bs: Whether to skip larger batch sizes after OOM
-    """
-    parser = argparse.ArgumentParser(
-        description="Launcher script for training configurations.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "--config_file",
-        type=str,
-        default=os.getenv("LAUNCHER_PARAM_CONFIG", "config/flux_mini_benchmark.yaml"),
-        help="Path to the YAML parameter configuration file containing parameter values.",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=os.getenv("LAUNCHER_OUTPUT_DIR", "outputs/runs/sweep_000"),
-        help="Directory where output logs and configs will be saved.",
-    )
-    parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        default=False,
-        help="Whether to perform a dry run without executing training commands.",
-    )
-    parser.add_argument(
-        "--show_config",
-        action="store_true",
-        default=False,
-        help="Simply visualize the full config without executing the runs.",
-    )
-    parser.add_argument(
-        "--warmup_steps",
-        type=int,
-        default=int(os.getenv("LAUNCHER_WARMUP_STEPS", "5")),
-        help="Number of initial steps to exclude from average computations.",
-    )
-    parser.add_argument(
-        "--no_resume",
-        action="store_false",
-        dest="resume",
-        help="If specified, do not skip any runs regardless of previous status.",
-    )
-    parser.add_argument(
-        "--no_skip_larger_bs",
-        action="store_false",
-        dest="skip_larger_bs",
-        help="Do not skip runs with larger batch sizes if smaller ones OOMed.",
-    )
-
-    args, unknown = parser.parse_known_args()
-
-    # Validate paths
-    if not os.path.isfile(args.config_file):
-        parser.error(f"Parameter config file not found: {args.config_file}")
-
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    return args, unknown
-
-
-def load_configurations(cfg: dict) -> List[Dict[str, Dict[str, Any]]]:
-    """Loads configurations from a parameter configuration file and generates all combinations.
-
-    Args:
-        config_file (str): Path to the YAML parameter configuration file.
-
-    Returns:
-        List[Dict[str, Dict[str, Any]]]: A list of configurations, each containing
-            'accelerate_config' and 'train_args' dictionaries.
-    """
-    accelerate_combinations = generate_combinations(cfg.get(ACCELERATE_CONFIG, {}))
-    cli_combinations = generate_combinations(cfg.get(CLI_ARGS, {}))
-    return combine_configurations(accelerate_combinations, cli_combinations)
-
-
-def load_yaml_config(config_file: str) -> Dict[str, Any]:
-    """Loads a YAML configuration file.
-
-    Args:
-        config_file (str): Path to the YAML parameter configuration file.
-
-    Returns:
-        Dict[str, Any]: Parsed YAML configuration.
-    """
-    with open(config_file, "r") as f:
-        return yaml.safe_load(f)
-
-
-def generate_combinations(params: Dict[str, Any]) -> List[Dict[str, Any]]:
+def generate_combinations(params: DictConfig) -> List[Dict[str, Any]]:
     """Generates all combinations of parameters.
 
     Args:
@@ -207,30 +108,6 @@ def generate_combinations(params: Dict[str, Any]) -> List[Dict[str, Any]]:
         return combinations
 
     return [{}]
-
-
-def combine_configurations(
-    accelerate_combinations: List[Dict[str, Any]],
-    cli_combinations: List[Dict[str, Any]],
-) -> List[Dict[str, Dict[str, Any]]]:
-    """Combines accelerate and CLI parameter combinations.
-
-    Args:
-        accelerate_combinations (List[Dict[str, Any]]): List of accelerate parameter combinations.
-        cli_combinations (List[Dict[str, Any]]): List of CLI parameter combinations.
-
-    Returns:
-        List[Dict[str, Dict[str, Any]]]: Combined configurations.
-    """
-    all_combinations = []
-    for cli_combination in cli_combinations:
-        for accel_combination in accelerate_combinations:
-            combined = {
-                ACCELERATE_CONFIG: accel_combination,
-                CLI_ARGS: cli_combination,
-            }
-            all_combinations.append(combined)
-    return all_combinations
 
 
 def build_command(
@@ -359,9 +236,28 @@ def run_training(
         logging.info(f"Executing command for run {idx}: {' '.join(cmd)}")
         with open(log_filename, "w") as log_file:
             try:
-                subprocess.run(
-                    cmd, stdout=log_file, stderr=subprocess.STDOUT, check=True
+                # Use Popen to capture output in real-time for both console and file.
+                # subprocess.run is blocking and returns after subprocess exits.
+                # Thus cannot capture and process output in real-time.
+                # subprocess.Popen returns immediately after starting the process.
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,  # buffer 1 line so it can be redirected immediately
                 )
+
+                # redirect output in real-time
+                for line in process.stdout:  # 1 line buffered => only 1 line to read
+                    sys.stdout.write(line)  # Print to console
+                    log_file.write(line)  # Write to file
+                    log_file.flush()  # Ensure immediate write
+
+                process.wait()  # Wait for the process to finish
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, cmd)
+
                 logging.info(f"Run {idx} completed successfully!")
             except subprocess.CalledProcessError as e:
                 logging.error(
@@ -469,6 +365,22 @@ def should_skip_obvious_ooms(
     return False
 
 
+def get_run_info(idx, accelerate_config, train_args):
+    run_name = "_".join(
+        [
+            f"mdl={train_args.get('model', 'unknown')}",
+            f"bs={train_args.get('train_batch_size', 'unknown')}",
+            f"res={train_args.get('resolution', 'unknown')}",
+            f"gckp={train_args.get('gradient_checkpointing', 'unknown')}",
+            f"mp={accelerate_config.get('mixed_precision', 'unknown')}",
+            f"cmpl={accelerate_config.get('dynamo_config', {}).get('dynamo_backend', 'unknown')}",
+        ]
+    )
+    # replace all special characters including space with underscore
+    run_name = re.sub(r"[^a-zA-Z0-9_=]", "_", run_name)
+    return (idx, run_name)
+
+
 def prepare_run_configurations(
     combinations: List[Dict[str, Dict[str, Any]]],
     output_dir: str,
@@ -484,14 +396,17 @@ def prepare_run_configurations(
         train_args_params = combination[CLI_ARGS]
 
         # Save combined configuration
-        config_filename = os.path.join(output_dir, f"{idx}_config.yaml")
-        save_configuration(config_filename, accelerate_config_params, train_args_params)
+        run_id, run_name = get_run_info(
+            idx, accelerate_config_params, train_args_params
+        )
+        config_path = os.path.join(output_dir, f"{run_id}_config_{run_name}.yaml")
+        save_configuration(config_path, accelerate_config_params, train_args_params)
 
 
 def should_skip(
     idx: int,
     combination: Dict[str, Dict[str, Any]],
-    args: argparse.Namespace,
+    cfg: DictConfig,
     dataframe: pd.DataFrame,
     git_info: Dict[str, Any],
 ) -> bool:
@@ -500,17 +415,17 @@ def should_skip(
     Args:
         idx: Run index
         combination: Parameter combination
-        args: Command line arguments
+        cfg: Configuration dictionary
         dataframe: Existing results dataframe
         git_info: Git repository info
 
     Returns:
         bool: True if run should be skipped
     """
-    if args.resume and should_skip_already_done(dataframe, idx):
+    if cfg.launcher.resume and should_skip_already_done(dataframe, idx):
         return True
 
-    if args.skip_larger_bs and dataframe is not None and not dataframe.empty:
+    if cfg.launcher.skip_larger_bs and dataframe is not None and not dataframe.empty:
         accelerate_config_params = combination[ACCELERATE_CONFIG]
         train_args_params = combination[CLI_ARGS]
 
@@ -521,7 +436,7 @@ def should_skip(
             TRAIN_BATCH_SIZE,
             accelerate_config_params,
             train_args_params,
-            args.output_dir,
+            cfg.train_args.logging_dir,
             git_info,
         ):
             return True
@@ -533,7 +448,7 @@ def should_skip(
             NUM_FRAMES,
             accelerate_config_params,
             train_args_params,
-            args.output_dir,
+            cfg.train_args.logging_dir,
             git_info,
         ):
             return True
@@ -545,7 +460,7 @@ def execute_run(
     idx: int,
     total_runs: int,
     combination: Dict[str, Dict[str, Any]],
-    args: argparse.Namespace,
+    cfg: DictConfig,
     dataframe: pd.DataFrame,
 ) -> pd.DataFrame:
     """Execute a single training run with specific configuration parameters.
@@ -555,7 +470,7 @@ def execute_run(
         total_runs (int): Total number of runs to be executed
         combination (Dict[str, Dict[str, Any]]): Dictionary containing accelerate config and CLI parameters
             for this specific run
-        args (argparse.Namespace): Parsed command line arguments containing global settings
+        cfg (DictConfig): Configuration dictionary
         dataframe (pd.DataFrame): DataFrame to store results and metrics
 
     Returns:
@@ -564,13 +479,27 @@ def execute_run(
     """
     accelerate_config_params = combination[ACCELERATE_CONFIG]
     train_args_params = combination[CLI_ARGS]
+    run_id, run_name = get_run_info(idx, accelerate_config_params, train_args_params)
 
     # Prepare output file
-    log_filename = os.path.join(args.output_dir, f"{idx}_logs.txt")
+    log_filename = os.path.join(
+        cfg.train_args.logging_dir, f"{run_id}_logs_{run_name}.txt"
+    )
+
+    # Setup trace folders for the current run
+    if "profiling_step" in train_args_params:
+        profile_dir = os.path.join(
+            cfg.train_args.logging_dir, f"{run_id}_profile_{run_name}"
+        )
+        os.makedirs(profile_dir, exist_ok=True)
+        train_args_params["profiling_logging_dir"] = profile_dir
+        logging.info(
+            f"Profiling enabled for run {run_id}. Logs will be saved to {profile_dir}"
+        )
 
     # Log run info
     logging.info("=" * 50)
-    logging.info(f"Starting run {idx}/{total_runs}")
+    logging.info(f"Starting run {idx}_{run_name}/{total_runs}")
     logging.info(f"Config:\n\033[1;31m{yaml.dump(combination, sort_keys=False)}\033[0m")
     logging.info(f"Logging to {log_filename}")
 
@@ -587,7 +516,7 @@ def execute_run(
             yaml.dump(accelerate_config_params, temp_accelerate_config)
             # Build command line arguments, run the training script and capture the output
             cmd = build_command(temp_file_path, train_args_params)
-            run_training(cmd, log_filename, idx, dry_run=args.dry_run)
+            run_training(cmd, log_filename, idx, dry_run=cfg.launcher.dry_run)
     finally:
         # Ensure the temporary config is removed if it exists
         if os.path.exists(temp_file_path):
@@ -596,41 +525,40 @@ def execute_run(
     return dataframe
 
 
-def main(args: argparse.Namespace, cfg: dict) -> None:
+@hydra.main(version_base=None, config_path="config")
+def main(cfg: DictConfig) -> None:
     """Main function to execute the launcher script."""
-    all_combinations = load_configurations(cfg)
-    total_runs = len(all_combinations)
-    logging.info(f"Total runs to execute: {total_runs}")
 
-    prepare_run_configurations(
-        all_combinations,
-        args.output_dir,
-    )
+    if cfg.launcher.show_config:
+        logging.info(
+            f"Full config:\n\033[1;31m{OmegaConf.to_yaml(cfg, resolve=True)}\033[0m"
+        )
+    else:
+        all_combinations = generate_combinations(cfg)
+        total_runs = len(all_combinations)
+        logging.info(f"Total runs to execute: {total_runs}")
 
-    git_info = get_git_info()
-    dataframe = generate_dataframe(args.output_dir, args.warmup_steps, git_info)
+        prepare_run_configurations(
+            all_combinations,
+            cfg.train_args.logging_dir,
+        )
 
-    for idx, combination in enumerate(all_combinations, start=1):
-        if should_skip(idx, combination, args, dataframe, git_info):
-            continue
-        execute_run(idx, total_runs, combination, args, dataframe)
-        dataframe = generate_dataframe(args.output_dir, args.warmup_steps, git_info)
+        git_info = get_git_info()
+        dataframe = generate_dataframe(
+            cfg.train_args.logging_dir, cfg.launcher.warmup_steps, git_info
+        )
 
-    logging.info("All runs completed.")
-    print_summary_statistics(dataframe)
+        for idx, combination in enumerate(all_combinations, start=1):
+            if should_skip(idx, combination, cfg, dataframe, git_info):
+                continue
+            execute_run(idx, total_runs, combination, cfg, dataframe)
+            dataframe = generate_dataframe(
+                cfg.train_args.logging_dir, cfg.launcher.warmup_steps, git_info
+            )
+
+        logging.info("All runs completed.")
+        print_summary_statistics(dataframe)
 
 
 if __name__ == "__main__":
-    # Parse argparse arguments first
-    args, unknown = parse_args()
-
-    # Initialize Hydra and compose the configuration
-    config_path, config_name = os.path.split(args.config_file)
-    with initialize(config_path=config_path, version_base=None):
-        param_config = compose(config_name=config_name, overrides=unknown)
-
-    yaml_config = OmegaConf.to_yaml(param_config)
-    logging.info(f"Full config:\n\033[1;31m{yaml_config}\033[0m")
-    if not args.show_config:
-        param_config = OmegaConf.to_container(param_config)
-        main(args, param_config)
+    main()

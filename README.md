@@ -13,8 +13,9 @@
     - [Executing shell inside a Docker container](#executing-shell-inside-a-docker-container)
     - [Downloading the assets](#downloading-the-assets)
   - [Running FLUX.1-dev full-weight training](#running-flux1-dev-full-weight-training)
-    - [Creating a custom configuration](#creating-a-custom-configuration)
-    - [Run the benchmarks](#run-the-benchmarks)
+    - [Creating a custom Accelerate configuration](#creating-a-custom-accelerate-configuration)
+  - [Benchmark results](#benchmark-results)
+    - [Reproducing the benchmarks](#reproducing-the-benchmarks)
   - [Training stability and convergence analysis](#training-stability-and-convergence-analysis)
   - [Contributing](#contributing)
     - [Pre-commit hooks](#pre-commit-hooks)
@@ -45,7 +46,7 @@
     make exec_docker
     ```
 
-3) Download the necessary assets:
+3) Download the necessary assets (optional; speeds up the subsequent launching of the training runs):
 
     ```bash
     make download_assets
@@ -145,7 +146,7 @@ See `python launcher.py --help` to view all launcher parameters.
 To train the model using the launcher, run the following command:
 
 ```bash
-python launcher.py --config_file=config/single_run.yaml [OPTIONS]
+python launcher.py --config-name=single_run.yaml [OPTIONS]
 ```
 
 By default, single runs use the `config/accelerate_config/fsdp_config.yaml` configuration, which utilizes FSDP across 8 GPUs and disables `torch.compile()`.
@@ -164,47 +165,58 @@ For example, `train_args.train_batch_size=32`.
 - See `python train.py --help` to view the rest of the training parameters.
 They can be provided to the launcher with `+train_args.<parameter>=<value>` (notice the leading plus symbol).
 
-### Creating a custom configuration
+### Creating a custom Accelerate configuration
 
 This project uses Accelerate as the training backend.
 Accelerate is a PyTorch library that supports multiple distributed training strategies, including DDP, FSDP, and DeepSpeed.
 To create or modify an Accelerate configuration, run:
 
 ```bash
-accelerate config --config_file config/accelerate_config/your_config_name.yaml
+accelerate config --config_file config/accelerate_config/accl_config.yaml
 ```
 
-The custom configuration can be used in the launcher by running:
+The custom Accelerate configuration can be used in the launcher by running:
 
 ```bash
-python launcher.py accelerate_config=your_config_name [OPTIONS]
+python launcher.py --config-name=<your_config_file> accelerate_config=accl_config [OPTIONS]
 ```
 
-> **Note:**  If a `--config_file` is not specified, the configuration is by default saved in `$HF_HOME/accelerate/default_config.yaml`.
-> However, the launcher strictly expects all Accelerate configurations to be located in `config/accelerate_config/` for them to be usable.
+**Notice!**
 
-### Run the benchmarks
+- `--config-name` should be the yaml file in the `config` root folder.
+These are entry point files that inherit default values from other files organized into folders referred to as 'config groups' in Hydra.
+More details about modifying them can be found [here](https://hydra.cc/docs/0.11/tutorial/config_groups/)
 
-To run the benchmark results using the launcher run:
+- The launcher strictly expects all Accelerate configurations to be located in `config/accelerate_config/` for them to be usable.
 
-```bash
-python launcher.py --config_file=config/flux_full_benchmark.yaml
-```
+- Accelerate and Hydra use different argument names to refer to configuration files
+  - Accelerate uses `--config_file`
+  - Hydra uses `--config-name`
 
-which will automatically sweep the training script through a range of different parameter settings (precisions, batch sizes, etc.) using Fully Sharded Data Parallel (FSDP) across 8x (MI300X) GPUs.
-
-- The default option `--config_file=config/flux_mini_benchmark.yaml` will run a minimal benchmark
-- The results will by default be stored to `outputs/runs`: one can view them with
-
-  ```bash
-  csvlook outputs/runs/sweep_000/runs_summary.csv
-  ```
+## Benchmark results
 
 The frames per second (FPS) for a single GPU using bf16 precision are shown in the table below.
 
 | Precision | Single GPU FPS (micro batch size = 1) | Single GPU FPS (optimal micro batch size) |
 | --------- | ------------------------------------- | ----------------------------------------- |
 | bf16      | 2.03                                  | 4.34 (micro batch size = 10)              |
+
+### Reproducing the benchmarks
+
+To reproduce the benchmark results using the launcher run:
+
+```bash
+python launcher.py --config-name=flux_benchmark
+```
+
+which will automatically sweep the training script through a range of different parameter settings (precisions, batch sizes, etc.)
+
+- For a minimal benchmark use the option `--config-name=flux_mini_benchmark.yaml`
+- The results will by default be stored to `outputs/runs`: one can view them with
+
+  ```bash
+  csvlook outputs/runs/sweep_000/runs_summary.csv
+  ```
 
 ## Training stability and convergence analysis
 
@@ -214,7 +226,7 @@ It is important to note that we started from a pretrained checkpoint, so radical
 The training was launched using the following command, varying the precision and learning rate as required.
 
 ```bash
-python launcher.py --config_file=config/single_run.yaml \
+python launcher.py --config-name=single_run.yaml \
   train_args.train_batch_size=16 \
   train_args.num_iterations=1500 \
   +train_args.learning_rate=1e-6 \
