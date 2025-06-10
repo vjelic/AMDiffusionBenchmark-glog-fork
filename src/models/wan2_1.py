@@ -26,7 +26,7 @@ class Wan2_1_I2V_Model(BaseModel):
         loss_type (str): The loss function type ("flow_match" for this implementation).
     """
 
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(self, args: argparse.Namespace, is_training: bool = True) -> None:
         """Initializes the Wan2.1 img2vid with appropriate submodule configurations.
 
         The constructor sets up the diffusion pipeline for video generation
@@ -39,9 +39,7 @@ class Wan2_1_I2V_Model(BaseModel):
         # Initial implementation of Wan2.1 model
         self.hf_id = "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers"
 
-        super(Wan2_1_I2V_Model, self).__init__(
-            args,
-        )
+        super(Wan2_1_I2V_Model, self).__init__(args, is_training)
 
         self.denoiser_config = copy.deepcopy(self.denoiser.config)
 

@@ -744,8 +744,9 @@ class Trainer:
                     with torch.no_grad():
                         self.generate(iter=global_step)
 
-        # Save the trained model's checkpoint
-        Path(self.args.output_dir, "checkpoint").mkdir(parents=True, exist_ok=True)
+        # Save the trained model's
+        checkpoint_dir = Path(self.args.output_dir, "checkpoint", self.args.model)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
         with (
             self.model.denoiser.summon_full_params(self.model.denoiser, writeback=False)
             if self.accelerator.distributed_type == accelerate.DistributedType.FSDP
@@ -753,7 +754,7 @@ class Trainer:
         ):
             if self.accelerator.is_local_main_process:
                 self.accelerator.unwrap_model(self.model.denoiser).save_pretrained(
-                    str(Path(self.args.output_dir, "checkpoint"))
+                    str(checkpoint_dir)
                 )
 
         # Empty the cache

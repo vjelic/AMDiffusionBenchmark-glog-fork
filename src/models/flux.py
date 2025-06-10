@@ -24,7 +24,7 @@ class FluxModel(BaseModel):
         num_channels_latents (int): Number of channels in the latents for this model.
     """
 
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(self, args: argparse.Namespace, is_training: bool = True) -> None:
         """Initializes the FluxModel with default FLUX.1-specific settings.
 
         Args:
@@ -35,7 +35,7 @@ class FluxModel(BaseModel):
         self.hf_id = "black-forest-labs/FLUX.1-dev"
         self.guidance = 1.0
 
-        super(FluxModel, self).__init__(args)
+        super(FluxModel, self).__init__(args, is_training)
 
         # VAE config
         self.vae_scale_factor = 2 ** (

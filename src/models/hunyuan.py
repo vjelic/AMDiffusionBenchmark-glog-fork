@@ -23,10 +23,7 @@ class HunyuanVideoModel(BaseModel):
         prompt_template (dict): Template for prompt formatting, including a truncation (`crop_start`) parameter.
     """
 
-    def __init__(
-        self,
-        args: argparse.Namespace,
-    ) -> None:
+    def __init__(self, args: argparse.Namespace, is_training: bool = True) -> None:
         """Initializes the HunyuanVideoModel with appropriate submodule configurations.
 
         The constructor sets up the diffusion pipeline for video generation
@@ -39,7 +36,7 @@ class HunyuanVideoModel(BaseModel):
         # Initial implementation of Hunyuan-video model
         self.hf_id = "hunyuanvideo-community/HunyuanVideo"
         self.guidance = 1000.0
-        super(HunyuanVideoModel, self).__init__(args)
+        super(HunyuanVideoModel, self).__init__(args, is_training)
 
         self.denoiser_config = copy.deepcopy(self.denoiser.config)
 

@@ -26,7 +26,7 @@ class MochiModel(BaseModel):
         loss_type (str): The loss function type ("flow_match" for this implementation).
     """
 
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(self, args: argparse.Namespace, is_training: bool = True) -> None:
         """Initializes the Mochi-1 with appropriate submodule configurations.
 
         The constructor sets up the diffusion pipeline for video generation
@@ -39,7 +39,7 @@ class MochiModel(BaseModel):
         # Initial implementation of Mochi-1 model
         self.hf_id = "genmo/mochi-1-preview"
 
-        super(MochiModel, self).__init__(args)
+        super(MochiModel, self).__init__(args, is_training)
 
         self.denoiser_config = copy.deepcopy(self.denoiser.config)
         original_tokenizer = self.submodules["tokenizer"]

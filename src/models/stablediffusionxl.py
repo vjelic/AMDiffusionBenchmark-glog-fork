@@ -28,7 +28,7 @@ class StableDiffusionXLModel(BaseModel):
         num_channels_latents (int): Number of latent channels.
     """
 
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(self, args: argparse.Namespace, is_training: bool = True) -> None:
         """
         Initializes the StableDiffusionXLModel with SDXL-specific settings.
 
@@ -40,7 +40,7 @@ class StableDiffusionXLModel(BaseModel):
         self.hf_id = "stabilityai/stable-diffusion-xl-base-1.0"
         self.guidance = None
 
-        super(StableDiffusionXLModel, self).__init__(args)
+        super(StableDiffusionXLModel, self).__init__(args, is_training)
 
         # Calculate VAE scale factor and derive dimensions.
         self.vae_scale_factor = 2 ** (

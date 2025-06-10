@@ -525,7 +525,7 @@ def execute_run(
     return dataframe
 
 
-@hydra.main(version_base=None, config_path="config")
+@hydra.main(version_base=None, config_path="config", config_name="single_run")
 def main(cfg: DictConfig) -> None:
     """Main function to execute the launcher script."""
 

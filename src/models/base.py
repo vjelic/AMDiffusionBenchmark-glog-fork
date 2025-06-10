@@ -47,7 +47,7 @@ class BaseModel:
         submodules (dict): Collection of submodules to be loaded from the pipeline.
     """
 
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(self, args: argparse.Namespace, is_training: bool = True) -> None:
         """Initializes the BaseModel.
 
         Args:
@@ -75,17 +75,8 @@ class BaseModel:
 
         self.init_modules_from_pipeline()
         self.init_attention()
-        self.init_checkpointing(
-            checkpointing_pct=self.args.gradient_checkpointing,
-        )
-        sigmas = (
-            self.submodules["scheduler"].timesteps
-            / self.submodules["scheduler"].config.num_train_timesteps
-        )
-        self.sigmas = self.args.shift * sigmas / (1 + (self.args.shift - 1) * sigmas)
-        self.submodules["scheduler"].timesteps = (
-            self.sigmas * self.submodules["scheduler"].config.num_train_timesteps
-        )
+        if is_training:
+            self.init_training()
 
     def init_modules_from_pipeline(self) -> None:
         """Initializes the modules from the Diffusers pipeline.
@@ -96,7 +87,9 @@ class BaseModel:
         """
         # Download all parts of the model
         self.pipe = pipeline_map[self.hf_id].from_pretrained(
-            self.args.model_path if self.args.model_path else self.hf_id
+            self.args.model_path
+            if getattr(self.args, "model_path", None)
+            else self.hf_id
         )
 
         # Get all the individual modules
@@ -121,7 +114,7 @@ class BaseModel:
             for original_name, replacement in replacement_processors.items():
                 if type(value).__name__ == original_name:
                     new_attn_dict[key] = replacement(
-                        self.args.substitute_sdpa_with_flash_attn
+                        getattr(self.args, "substitute_sdpa_with_flash_attn", False)
                     )
                     continue
             # If there is not matching attention processor raise error
@@ -131,6 +124,14 @@ class BaseModel:
                 )
 
         self.denoiser.set_attn_processor(new_attn_dict)
+
+    def init_training(
+        self,
+    ):
+        self.init_checkpointing(
+            checkpointing_pct=getattr(self.args, "gradient_checkpointing", 0.0),
+        )
+        self.init_sigmas()
 
     def init_checkpointing(
         self,
@@ -193,6 +194,16 @@ class BaseModel:
         logger.info(
             f"Applying partial gradient checkpointing on transformer blocks "
             f"{checkpointed_blocks_names} (`actualized_pct={actual_checkpointing_pct:.2f}`)"
+        )
+
+    def init_sigmas(self) -> None:
+        sigmas = (
+            self.submodules["scheduler"].timesteps
+            / self.submodules["scheduler"].config.num_train_timesteps
+        )
+        self.sigmas = self.args.shift * sigmas / (1 + (self.args.shift - 1) * sigmas)
+        self.submodules["scheduler"].timesteps = (
+            self.sigmas * self.submodules["scheduler"].config.num_train_timesteps
         )
 
     def init_lora(self) -> None:
