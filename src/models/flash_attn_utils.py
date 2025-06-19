@@ -18,12 +18,13 @@ except ModuleNotFoundError:
         index_first_axis = None
         pad_input = None
 
+torch._dynamo.config.capture_scalar_outputs = True
+
 
 def is_fa_available():
     return flash_attn is not None
 
 
-@torch._dynamo.disable
 def _get_unpad_data(
     hidden_states,
     attention_mask: torch.Tensor,

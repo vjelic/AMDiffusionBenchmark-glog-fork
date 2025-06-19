@@ -1,3 +1,33 @@
+# ------------------------------------------------------------------------
+# Portions of this file are derived from the diffusers library:
+# https://github.com/huggingface/diffusers
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ------------------------------------------------------------------------
+#
+# BEGIN MODIFICATIONS
+# The following attention processors have been adapted from the diffusers library
+# (https://github.com/huggingface/diffusers), with modifications for integration
+# into AMDiffusionBenchmark:
+# - FAFluxAttnProcessor2_0
+# - FAHunyuanVideoAttnProcessor2_0
+# - FAAttnProcessor2_0
+# - FAMochiAttnProcessor2_0
+# - FAWanAttnProcessor2_0
+# These processors have been modified to work with the Flash Attention library
+# END MODIFICATIONS
+
+
 import warnings
 from typing import Optional
 
@@ -54,7 +84,9 @@ def sdpa(
     return hidden_states
 
 
-# Based on https://github.com/huggingface/diffusers/blob/de6a88c2d7659c616b44c0856677335110b8ff2e/src/diffusers/models/attention_processor.py#L2275
+# Modified from https://github.com/huggingface/diffusers/blob/f0dba33d82af991369806312f61ab4c6cb7a8dd1/src/diffusers/models/attention_processor.py#L2275
+# * renamed to FAFluxAttnProcessor2_0
+# * added flash-attention support
 class FAFluxAttnProcessor2_0:
     """Attention processor used typically in processing the SD3-like self-attention projections."""
 
@@ -167,6 +199,9 @@ class FAFluxAttnProcessor2_0:
             return hidden_states
 
 
+# Modified from https://github.com/huggingface/diffusers/blob/f0dba33d82af991369806312f61ab4c6cb7a8dd1/src/diffusers/models/attention_processor.py#L3770
+# * renamed to FAHunyuanVideoAttnProcessor2_0
+# * added flash-attention support
 class FAHunyuanVideoAttnProcessor2_0:
     def __init__(self, substitute_sdpa_with_flash_attn: bool = is_fa_available()):
         if not hasattr(F, "scaled_dot_product_attention"):
@@ -281,6 +316,9 @@ class FAHunyuanVideoAttnProcessor2_0:
         return hidden_states, encoder_hidden_states
 
 
+# Modified from https://github.com/huggingface/diffusers/blob/f0dba33d82af991369806312f61ab4c6cb7a8dd1/src/diffusers/models/attention_processor.py#L3242
+# * renamed to FAAttnProcessor2_0
+# * added flash-attention support
 class FAAttnProcessor2_0:
     r"""
     Processor for implementing scaled dot-product attention (enabled by default if you're using PyTorch 2.0).
@@ -398,7 +436,9 @@ class FAAttnProcessor2_0:
         return hidden_states
 
 
-# Based on https://github.com/huggingface/diffusers/blob/de6a88c2d7659c616b44c0856677335110b8ff2e/src/diffusers/models/attention_processor.py#L996
+# Modified from https://github.com/huggingface/diffusers/blob/f0dba33d82af991369806312f61ab4c6cb7a8dd1/src/diffusers/models/attention_processor.py#L996
+# * renamed to FAMochiAttnProcessor2_0
+# * added flash-attention support
 class FAMochiAttnProcessor2_0:
     """Attention processor used in Mochi."""
 
@@ -529,7 +569,9 @@ class FAMochiAttnProcessor2_0:
         return hidden_states, encoder_hidden_states
 
 
-# https://github.com/huggingface/diffusers/blob/506f39af3a7b533209cc96f1732fff347070bdbd/src/diffusers/models/transformers/transformer_wan.py#L37
+# Modified from https://github.com/huggingface/diffusers/blob/f0dba33d82af991369806312f61ab4c6cb7a8dd1/src/diffusers/models/transformers/transformer_wan.py#L37
+# * renamed to FAWanAttnProcessor2_0
+# * added flash-attention support
 class FAWanAttnProcessor2_0:
     def __init__(self, substitute_sdpa_with_flash_attn: bool = is_fa_available()):
         if not hasattr(F, "scaled_dot_product_attention") and not is_fa_available():

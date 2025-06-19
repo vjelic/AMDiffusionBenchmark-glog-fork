@@ -175,6 +175,7 @@ def main():
         }
         if model_output_type == "video":
             pipeline_kwargs["num_frames"] = args.num_frames
+            pipeline.enable_vae_tiling()
         if model_input_type == "image":  # wan2.1-i2v
             pipeline_kwargs["image"] = load_image(prompt)
             prompt = pipeline_kwargs["prompt"] = preprocess_prompt(Path(prompt).stem)

@@ -190,7 +190,7 @@ class Wan2_1_I2V_Model(BaseModel):
         """
         output = {}
         output["hidden_states"] = torch.cat(
-            [batch["latents"], batch["condition"]], dim=1
+            [batch["noised_latents"], batch["condition"]], dim=1
         )
         output["encoder_hidden_states"] = batch["prompt_embeds"]
         output["encoder_hidden_states_image"] = batch["encoder_hidden_states_image"]

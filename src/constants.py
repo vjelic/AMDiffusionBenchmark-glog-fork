@@ -2,14 +2,17 @@
 
 # Default metrics
 DEFAULT_METRICS = {
+    "total_elapsed_time": None,
     "avg_loss": None,
     "std_loss": None,
     "avg_loss_tail": None,
     "std_loss_tail": None,
-    "avg_time": None,
-    "std_time": None,
-    "avg_fps": None,
-    "std_fps": None,
+    "avg_step_time_total": None,
+    "std_step_time_total": None,
+    "avg_step_time_gpu": None,
+    "std_step_time_gpu": None,
+    "avg_fps_gpu": None,
+    "std_fps_gpu": None,
     "avg_tflops": None,
     "std_tflops": None,
     "num_samples": 0,
